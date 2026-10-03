@@ -1,0 +1,122 @@
+name: macOS
+
+# Builds the engine and the application bundle on an Apple Silicon runner, so
+# that anyone cloning this repository can verify the port rather than take it on
+# trust. Upstream OpenTS builds on Windows; this workflow is for the port carried
+# here, and does not run upstream's engine.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "code/**"
+      - "cmake/**"
+      - "thirdparty/**"
+      - "tools/macos-app/**"
+      - "CMakeLists.txt"
+      - ".gitmodules"
+      - ".github/workflows/macos.yml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "code/**"
+      - "cmake/**"
+      - "thirdparty/**"
+      - "tools/macos-app/**"
+      - "CMakeLists.txt"
+      - ".gitmodules"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (arm64)
+    # A draft pull request builds nothing; ready_for_review starts it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The renderer (bgfx.cmake) and the audio backend (miniaudio) are
+          # submodules, and the configure fails with a clear message if they are
+          # missing, so fetch them here rather than discovering it mid-build.
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Report toolchain
+        run: |
+          sw_vers
+          uname -m
+          cmake --version
+          clang --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DOPENTS_EXPERIMENTAL_NONWIN32=ON \
+            -DCMAKE_BUILD_TYPE=Release
+
+      # The engine is large; parallel build keeps the job inside its timeout.
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Confirm the engine was produced
+        run: |
+          test -x build/bin/Game
+          file build/bin/Game
+          # A 32-bit binary here would mean the port's central claim is wrong.
+          lipo -archs build/bin/Game | grep -qx arm64
+
+      # The argument round trip is a regression test for a bug that silently
+      # truncated any path containing a space, which is every default macOS
+      # user directory. Cheap to run, and it must not come back.
+      - name: Test the command-line round trip
+        run: |
+          clang++ -std=c++20 -DOPENTS_EXPERIMENTAL_NONWIN32=ON \
+            -include code/port/port_early.h \
+            -Icode/port -Icode/port/shim -Icode \
+            -o /tmp/opents-argtest tools/macos-app/test_arg_roundtrip.cpp
+          /tmp/opents-argtest
+
+      # The bundle is what most people actually run, and a bundle can be broken
+      # in ways the engine build does not show: an unsealable layout, or a file
+      # written inside it at runtime.
+      - name: Install Pillow and build the application bundle
+        run: |
+          python3 -m pip install --user Pillow
+          tools/macos-app/make_app.sh
+
+      - name: Verify the bundle and its seal
+        run: |
+          APP=dist/OpenTS.app
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          # Nothing may be written into the bundle: a sealed bundle rejects
+          # files that were not there when it was signed, so a runtime write
+          # breaks notarization even though an ad-hoc build still launches.
+          find "$APP" -type f | LC_ALL=C sort > /tmp/before.txt
+          OPENTS_DATA_DIR="${RUNNER_TEMP}/no-such-data" \
+          OPENTS_VALIDATE_ONLY=1 "$APP/Contents/MacOS/OpenTS" \
+            > /tmp/validate.txt 2>&1 || true
+          grep -q INCOMPLETE /tmp/validate.txt
+          find "$APP" -type f | LC_ALL=C sort > /tmp/after.txt
+          diff /tmp/before.txt /tmp/after.txt
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload the application bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTS.app
+          path: dist/OpenTS.app
+          # An .app is a directory; without this the zip loses the symlinks
+          # inside it and Gatekeeper rejects the result.
+          include-hidden-files: true
+          retention-days: 14
