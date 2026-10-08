@@ -1,5 +1,26 @@
 cmake_minimum_required(VERSION 3.23)
 
+# The oldest macOS a build should run on, set before project() so it reaches the
+# compiler and linker command lines. Without it CMake stamps the *host* SDK into
+# LC_BUILD_VERSION, so a binary built on a recent macOS refuses to launch on
+# anything older while the app bundle's LSMinimumSystemVersion still advertises
+# an older version -- the app then dies at launch with no useful message instead
+# of a clear "requires macOS 27".
+#
+# 12.0 (Monterey) is the floor: it is the oldest release with the unified
+# arm64/x86 userland the Apple Silicon port needs. The API surface the port
+# actually uses is far older -- AppKit, CAMetalLayer and QuartzCore events all
+# predate it by a decade -- so this is a support decision rather than a technical
+# limit. Overridable to aim lower:
+#
+#   cmake -S . -B build -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+#
+# Windows builds ignore this entirely.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+        "Oldest macOS version this build should run on")
+endif()
+
 project(OpenTS VERSION 0.2.0 LANGUAGES C CXX)
 
 # A SemVer prerelease label, which project() cannot carry because it takes numbers only. Set it

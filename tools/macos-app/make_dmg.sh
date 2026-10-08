@@ -68,11 +68,52 @@ fi
 echo "make_dmg.sh: signing the staged bundle"
 # Re-signed in place because the signature records the bundle's location, and
 # staging is a different path from where make_app.sh signed it.
-codesign --force --sign "${OPENTS_SIGN_IDENTITY:--}" --timestamp=none \
+sign_identity="${OPENTS_SIGN_IDENTITY:--}"
+if [ "$sign_identity" = "-" ]; then
+	timestamp_flag="--timestamp=none"
+else
+	timestamp_flag="--timestamp"
+fi
+
+codesign --force --sign "$sign_identity" "$timestamp_flag" \
+	--options runtime \
 	--identifier org.opents.tiberiansun \
 	"$staging/$app_name.app" 2>&1 | sed 's/^/  /'
 
 codesign --verify --verbose=2 "$staging/$app_name.app" 2>&1 | sed 's/^/  /'
+
+# Notarization has to happen before the image is made, because stapling attaches
+# a ticket to the bundle and the image is built from what is inside it. A stapled
+# bundle inside an unstapled disk image still works -- Gatekeeper reads the ticket
+# from the bundle -- but stapling after the image exists would mean re-making the
+# image, so the order here is the cheap one.
+if [ -n "${OPENTS_NOTARY_PROFILE:-}" ]; then
+	if [ "$sign_identity" = "-" ]; then
+		echo "make_dmg.sh: OPENTS_NOTARY_PROFILE is set but the bundle is ad-hoc signed" >&2
+		echo "  Notarization needs a Developer ID. Set OPENTS_SIGN_IDENTITY too." >&2
+		exit 1
+	fi
+
+	echo "make_dmg.sh: notarizing"
+	# ditto rather than zip: it is what preserves the bundle's symlinks and
+	# extended attributes, which notarytool checks.
+	archive="$output_dir/.notarize.zip"
+	rm -f "$archive"
+	ditto -c -k --keepParent "$staging/$app_name.app" "$archive"
+
+	xcrun notarytool submit "$archive" \
+		--keychain-profile "$OPENTS_NOTARY_PROFILE" \
+		--wait 2>&1 | sed 's/^/  /'
+
+	xcrun stapler staple "$staging/$app_name.app" 2>&1 | sed 's/^/  /'
+	xcrun stapler validate "$staging/$app_name.app" 2>&1 | sed 's/^/  /'
+	rm -f "$archive"
+
+	# Re-signed above, so the seal is checked again after stapling touched it.
+	codesign --verify --verbose=2 "$staging/$app_name.app" 2>&1 | sed 's/^/  /'
+else
+	echo "make_dmg.sh: skipping notarization (set OPENTS_NOTARY_PROFILE to submit)"
+fi
 
 echo "make_dmg.sh: creating the image"
 rm -f "$dmg"
@@ -144,7 +185,20 @@ echo
 echo "make_dmg.sh: built $dmg"
 du -h "$dmg" | sed 's/^/  size     /'
 echo "  contents $app_name.app, README.txt, Applications (symlink)"
-echo
-echo "  Note: the bundle is ad-hoc signed, so first launch needs a right-click"
-echo "  -> Open, or the xattr command in README.txt. Notarization needs an"
-echo "  Apple Developer ID: set OPENTS_SIGN_IDENTITY and add a notarytool step."
+
+if [ -n "${OPENTS_NOTARY_PROFILE:-}" ]; then
+	echo "  signed with a Developer ID and notarized"
+else
+	cat <<'NOTE'
+
+  Ad-hoc signed, so first launch on another Mac needs a right-click -> Open, or
+  the xattr command in README.txt. To sign and notarize:
+
+    OPENTS_SIGN_IDENTITY="Developer ID Application: ..." \
+    OPENTS_NOTARY_PROFILE=<profile> \
+        tools/macos-app/make_dmg.sh
+
+  The profile holds the notarytool password:
+    xcrun notarytool store-credentials <profile>
+NOTE
+fi

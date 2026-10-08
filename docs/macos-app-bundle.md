@@ -108,11 +108,52 @@ unchanged after a run.
 
 ## Signing
 
-Ad-hoc (`codesign -s -`), which is enough to run on the machine that built it and
-keeps the build reproducible. A distributed build needs a Developer ID identity
-and notarization — pass it as `OPENTS_SIGN_IDENTITY` and add the notarization step
-after signing. Gatekeeper will also need the quarantine attribute cleared
-(`xattr -dr com.apple.quarantine`) or a notarized build.
+Ad-hoc (`codesign -s -`) by default, which is enough to run on the machine that
+built it and keeps the build reproducible. Gatekeeper will also need the
+quarantine attribute cleared (`xattr -dr com.apple.quarantine`) or the user
+right-clicking the app and choosing *Open*.
+
+For distribution, three things are needed and only the first is missing:
+
+1. **A Developer ID Application certificate.** Free-ish ($99/year, individual or
+   organisation) from Apple. Install the `.p12` in the keychain, add it to the
+   login keychain, and confirm:
+
+   ```sh
+   security find-identity -v -p codesigning    # must list it
+   ```
+
+   A self-signed certificate does not work: Gatekeeper rejects it and
+   notarization refuses it.
+
+2. **A notarytool keychain profile**, holding an app-specific password. Created
+   once, interactively:
+
+   ```sh
+   xcrun notarytool store-credentials <profile>
+   ```
+
+3. **Both variables set**, and then it is one command:
+
+   ```sh
+   OPENTS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+   OPENTS_NOTARY_PROFILE=<profile> \
+       tools/macos-app/make_dmg.sh
+   ```
+
+`make_dmg.sh` signs with `--timestamp` and `--options runtime` (notarization
+rejects a Developer ID signature without a secure timestamp), submits with
+`notarytool --wait`, staples, validates the ticket, and re-verifies the seal
+afterwards. Notarization happens **before** the image is built, because stapling
+attaches a ticket to the bundle and the image is made from what is inside it.
+
+The archive submitted is built with `ditto -c -k --keepParent` rather than `zip`,
+because notarytool checks the bundle's symlinks and extended attributes and `zip`
+strips them.
+
+Notarization is not cosmetic: an un-notarized app distributed by download is
+blocked outright, and users see "Apple could not verify" rather than a right-click
+workaround. It has to happen before release, not after reports arrive.
 
 ## Testing
 

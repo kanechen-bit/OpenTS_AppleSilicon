@@ -61,9 +61,38 @@ subsystems are thinner than they are on Windows.
 
 ## Requirements
 
-- macOS 12 or newer on Apple Silicon (arm64). Intel Macs are not targeted.
+- macOS 12 (Monterey) or newer on Apple Silicon (arm64). Intel Macs are not
+  targeted.
 - A legal copy of *Command & Conquer: Tiberian Sun* (Steam or EA App). OpenTS
   supplies the engine, never the game assets.
+
+The 12.0 floor is set explicitly at build time rather than inherited from the
+build machine. Without it, CMake stamps the host SDK into the binary, so a build
+on a recent macOS produces an app that refuses to start on anything older while
+the bundle still advertises 12.0 — and it fails with no message saying which
+version is required. `make_app.sh` now checks the plist and both binaries agree
+and refuses to produce a bundle otherwise. The APIs the port uses are all far
+older than 12.0, so the floor is a support decision rather than a limit; build
+with `-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0` to aim lower.
+
+## Signing
+
+Builds are **ad-hoc signed**, which means they run on the machine that built them
+and nowhere else. Anyone else needs to right-click the app and choose *Open* on
+first launch. That is the honest state of a community port: distributing it
+properly needs an Apple Developer ID, which costs $99/year.
+
+Everything needed is in place — `make_dmg.sh` will sign, notarize and staple in
+one command once a certificate exists:
+
+```sh
+OPENTS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+OPENTS_NOTARY_PROFILE=<profile> \
+    tools/macos-app/make_dmg.sh
+```
+
+See [the app bundle documentation](docs/macos-app-bundle.md#signing) for the
+certificate and keychain-profile setup.
 
 ## Building
 

@@ -54,8 +54,20 @@ mkdir -p "$output_dir"
 settings_template="$repo_root/tools/macos-app/SUN.INI"
 
 echo "make_app.sh: building the launcher"
+# The same deployment target the engine is built with, so the launcher does not
+# end up requiring a newer macOS than the engine it launches -- or than the
+# bundle's LSMinimumSystemVersion claims. Read from CMake's cache so there is
+# one value rather than two that can drift.
+#
+# Falls back to 12.0 when the cache is absent, which is the same default
+# CMakeLists.txt applies.
+deployment_target=$(sed -n 's/^CMAKE_OSX_DEPLOYMENT_TARGET:[^=]*=//p' \
+	"$repo_root/build/CMakeCache.txt" 2>/dev/null | head -1)
+: "${deployment_target:=12.0}"
+
 clang \
 	-x objective-c \
+	-mmacosx-version-min="$deployment_target" \
 	-framework Cocoa \
 	-Wall -Wextra -Wno-unused-parameter \
 	-o "$output_dir/.launcher.tmp" \
@@ -106,7 +118,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
+	<string>__DEPLOYMENT_TARGET__</string>
 
 	<!-- The engine reads its data files from a folder the player points at, never
 	     from inside the bundle, so the app has nothing to open on its own. -->
@@ -127,29 +139,113 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# Substituted after the heredoc rather than interpolated into it: the plist is
+# quoted ('PLIST') so that nothing else in it is expanded by the shell, and
+# unquoting it to interpolate one value would put every $ and backtick in the
+# plist at the mercy of the shell.
+#
+# Written to a temporary file and moved into place, rather than edited in place
+# with `sed -i`: the in-place form differs between BSD and GNU sed, and this
+# script has to run on a build machine as well as this one.
+plutil_file="$app/Contents/Info.plist"
+sed "s/__DEPLOYMENT_TARGET__/$deployment_target/" "$plutil_file" > "$plutil_file.tmp"
+mv "$plutil_file.tmp" "$plutil_file"
+
 plutil -lint "$app/Contents/Info.plist" > /dev/null
+
+echo "make_app.sh: verifying the deployment target"
+# The failure this guards against is quiet and total: LSMinimumSystemVersion
+# says one thing, the Mach-O says another, and the app is refused at launch on
+# every machine older than the *build* machine's macOS -- with no message saying
+# which version is required. It happened here, when a build on macOS 27 produced
+# a bundle advertising 12.0 that would not start on 26.
+#
+# So: the plist, the launcher and the engine must all agree, and the agreement
+# is checked rather than assumed.
+plist_target=$(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")
+
+for binary in OpenTS OpenTS-engine; do
+	if [ ! -x "$app/Contents/MacOS/$binary" ]; then
+		echo "make_app.sh: $binary is missing from the bundle" >&2
+		exit 1
+	fi
+
+	# The minos field of LC_BUILD_VERSION, as "major.minor".
+	binary_target=$(otool -l "$app/Contents/MacOS/$binary" \
+		| awk '/LC_BUILD_VERSION/ { found = 1; next }
+		       found && $1 == "minos" { print $2; exit }')
+
+	if [ "$binary_target" != "$plist_target" ]; then
+		echo "make_app.sh: $binary targets macOS $binary_target but the bundle" >&2
+		echo "  advertises $plist_target. The app would fail to launch on" >&2
+		echo "  anything older than $binary_target with no useful message." >&2
+		echo "  Rebuild the engine with -DCMAKE_OSX_DEPLOYMENT_TARGET=$plist_target." >&2
+		exit 1
+	fi
+
+	echo "  $binary: macOS $binary_target"
+done
+
+echo "  LSMinimumSystemVersion: $plist_target"
 
 echo "make_app.sh: signing"
 # Ad-hoc by default: enough to run on the machine that built it, and it keeps the
-# build reproducible. A distributed build needs a Developer ID identity, which
-# notarization also requires:
+# build reproducible. A distributed build needs a Developer ID identity:
 #
 #   OPENTS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 #       tools/macos-app/make_app.sh
 #
-# and then the notarization step, which has to come after signing:
-#
-#   xcrun notarytool submit dist/OpenTS.zip --keychain-profile <profile> --wait
-#   xcrun stapler staple dist/OpenTS.app
-#
-# The zip is because notarytool takes an archive, not a bare bundle.
+# --timestamp is left off for an ad-hoc signature because there is no timestamp
+# authority to ask; with a real identity it is switched on, since notarization
+# rejects a Developer ID signature without one.
 sign_identity="${OPENTS_SIGN_IDENTITY:--}"
-codesign --force --sign "$sign_identity" --timestamp=none \
+
+if [ "$sign_identity" = "-" ]; then
+	timestamp_flag="--timestamp=none"
+else
+	timestamp_flag="--timestamp"
+fi
+
+codesign --force --sign "$sign_identity" "$timestamp_flag" \
+	--options runtime \
 	--identifier org.opents.tiberiansun \
 	"$app" 2>&1 | sed 's/^/  /'
 
 echo "make_app.sh: verifying the seal"
 codesign --verify --verbose=2 "$app" 2>&1 | sed 's/^/  /'
+
+if [ "$sign_identity" = "-" ]; then
+	cat <<'NOTE'
+
+  Signed ad-hoc, so this build runs on this machine and nowhere else. To
+  distribute it:
+
+    1. Get a Developer ID Application certificate from Apple
+       (free, $99/year, individual or organisation) and install it in the
+       keychain, then confirm it appears:
+         security find-identity -v -p codesigning
+
+    2. Build with it:
+         OPENTS_SIGN_IDENTITY="Developer ID Application: ..." make_app.sh
+
+    3. Notarize. notarytool takes an archive rather than a bare bundle:
+         ditto -c -k --keepParent dist/OpenTS_AppleSilicon.app dist/OpenTS.zip
+         xcrun notarytool submit dist/OpenTS.zip \
+             --keychain-profile <profile> --wait
+         xcrun stapler staple dist/OpenTS_AppleSilicon.app
+
+       The keychain profile stores an app-specific password:
+         xcrun notarytool store-credentials <profile>
+
+    4. Re-zip the stapled bundle for distribution, or run make_dmg.sh, which
+       does the archive and submit steps for you when OPENTS_NOTARY_PROFILE
+       is set.
+
+  Until then, users need to right-click the app and choose Open on first
+  launch, or clear the quarantine attribute. The README in the disk image
+  explains this.
+NOTE
+fi
 
 echo
 echo "make_app.sh: built $app"

@@ -166,6 +166,13 @@ else()
     target_compile_options(OpenTS PRIVATE ${OPENTS_PORT_COMPILE_OPTIONS})
     target_include_directories(OpenTS PRIVATE ${OPENTS_PORT_INCLUDE_DIRS})
 
+    # CMAKE_OSX_DEPLOYMENT_TARGET is set in the top-level CMakeLists, before
+    # project(), because that is the only place CMake honours it. Setting the
+    # MACOSX_DEPLOYMENT_TARGET target property here instead is silently ignored
+    # by CMake 4.4: the flag never reaches the build and the binary gets stamped
+    # with the host SDK, so a build machine's macOS version becomes the app's
+    # minimum. Verified both ways.
+
     # The shim arrives through -include, so the compiler's dependency scan never
     # records port_early.h or anything it pulls in: editing the shim would rebuild
     # no object at all and leave a silently stale binary. Declare the dependency

@@ -157,3 +157,30 @@ touch code/port/windows_stub.h && ninja -C build Game   # ~438 TUs should recomp
 
 If far fewer recompile, the change did not propagate. Suspect the binary before
 suspecting the fix.
+
+## The deployment target trap
+
+`CMAKE_OSX_DEPLOYMENT_TARGET` has to be set before `project()`, or CMake stamps
+the **host SDK** into `LC_BUILD_VERSION` — so the minimum macOS of a release
+becomes whatever version the build machine happened to be running. This bit:
+a build on macOS 27 produced a bundle whose `LSMinimumSystemVersion` said 12.0
+and whose binaries required 27.0. It would have been refused at launch on every
+older machine, with no message naming the version required.
+
+Three things make it stick:
+
+1. The variable is set in the top-level `CMakeLists.txt` before `project()`. The
+   `MACOSX_DEPLOYMENT_TARGET` **target property** does not work — CMake 4.4
+   accepts it and silently omits the flag, which is worse than not setting it,
+   because it looks configured. Verified by isolating it in a three-line project.
+2. `make_app.sh` compiles the launcher separately and passes the same value,
+   read from CMake's cache, so the two cannot drift.
+3. `make_app.sh` then **verifies** that the plist and both binaries agree, and
+   exits non-zero if they do not. A silent mismatch is the whole failure mode,
+   so it is checked on every build rather than trusted.
+
+Worth knowing when reading the API list: nothing in the port needs anything
+recent. `NSWindow`, `CAMetalLayer` and the QuartzCore event APIs all predate
+macOS 10.15 by a decade, and there is not a single `@available` check in the
+shim. The 12.0 floor is a *support* decision — the oldest release with the
+unified arm64 userland — not a technical limit, and it is overridable.
