@@ -96,6 +96,32 @@ class UDPInterfaceClass : public WinsockInterfaceClass {
 		TransferResult Receive_From(void * buffer, int length, IPXAddressClass & from);
 
 		/*
+		 * A destination the OS reports as unreachable (a LAN_Peers entry whose machine
+		 * has left the network, so the ARP for its address never resolves) is skipped
+		 * for a while instead of retried: every retry is a wasted datagram, and the
+		 * send queue used to jam behind it and stall the whole lobby. Records expire,
+		 * so a machine that comes back rejoins on its own.
+		 */
+		struct UnreachableTarget {
+			unsigned long IP;         // network order
+			unsigned short Port;      // network order
+			unsigned long Until;      // TickCount after which the target is retried
+			bool Logged;              // one log line per address per session
+
+			// The vector's bookkeeping (duplicate checks through ID) compares
+			// records, so the comparison must exist even though the records are
+			// only ever found by address here.
+			bool operator==(UnreachableTarget const & that) const {
+				return(IP == that.IP && Port == that.Port && Until == that.Until && Logged == that.Logged);
+			}
+		};
+
+		bool Is_Target_Unreachable(IPXAddressClass const & address);
+		void Mark_Target_Unreachable(IPXAddressClass const & address);
+
+		DynamicVectorClass <UnreachableTarget> UnreachableTargets;
+
+		/*
 		**	Addresses to send to when broadcasting a packet.
 		*/
 		DynamicVectorClass <IPXAddressClass *> BroadcastAddresses;

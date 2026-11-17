@@ -129,6 +129,11 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 
+	<!-- LAN discovery sends and receives UDP broadcasts on port 1234, which
+	     macOS 15+ treats as local network operations requiring user consent. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OpenTS uses the local network to find and join LAN multiplayer games hosted by other players.</string>
+
 	<!-- A Metal game, so it wants the discrete GPU on a dual-GPU Mac. -->
 	<key>NSRequiresAquaSystemAppearance</key>
 	<false/>

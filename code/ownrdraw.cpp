@@ -2963,6 +2963,17 @@ LRESULT CALLBACK StaticCtrlProc(HWND window, UINT message, WPARAM wparam, LPARAM
 
 			data->Static.text = copy;
 
+			/*
+			** Keep the port's own window text in step. WM_PAINT reads the label
+			** back through GetWindowText, which returns the port's storage for
+			** this window -- not the owner-draw record above. Without this the
+			** control keeps painting whatever text the dialog template carried
+			** (the lobby map name's "None") no matter how often WM_SETTEXT is
+			** sent; SetDlgItemText callers never hit this because the stub
+			** writes the port storage directly.
+			*/
+			SetWindowText(window, text);
+
 			Surface * cachedSurf = data->cachedSurface;
 			if (cachedSurf != NULL) {
 				RECT drect;
@@ -3097,6 +3108,26 @@ LRESULT CALLBACK StaticCtrlProc(HWND window, UINT message, WPARAM wparam, LPARAM
 
 			data->Static.text = text;
 			data->Static.textColor = ODColorText;
+
+			/*
+			** One-shot route check for the WM_SETTEXT -> paint pipeline: send a
+			** marker through WM_SETTEXT, read it back the way WM_PAINT does
+			** (GetWindowText) and report. Before the port-storage sync this read
+			** returned the template text instead of the marker.
+			*/
+			static bool route_checked = false;
+			if (!route_checked && getenv("OPENTS_STATIC_TEST") != NULL) {
+				route_checked = true;
+				char orig[256];
+				GetWindowText(window, orig, sizeof(orig) - 1);
+				SendMessage(window, WM_SETTEXT, 0, (LPARAM)"ROUTE-CHECK-XYZ");
+				char readback[256] = {0};
+				GetWindowText(window, readback, sizeof(readback) - 1);
+				fprintf(stderr, "[SELFTEST] WM_SETTEXT route: readback='%s' (want ROUTE-CHECK-XYZ) orig='%s'\n",
+				        readback, orig);
+				fflush(stderr);
+				SendMessage(window, WM_SETTEXT, 0, (LPARAM)orig);
+			}
 			return(0);
 		}
 

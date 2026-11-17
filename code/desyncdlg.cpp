@@ -27,6 +27,7 @@
 #include "loaddlg.h"
 #include "misc.h"
 #include "mpload.h"
+#include "msgbox.h"
 #include "netdlg.h"
 #include "netglobal.h"
 #include "ownrdraw.h"
@@ -92,7 +93,11 @@ DesyncDialogClass::OutcomeType DesyncDialogClass::Run(void)
 	OutcomeType outcome = OutcomeType::Continue;
 
 	if (Window == NULL) {
-		DebugString("The out-of-sync dialog could not be created; continuing\n");
+		// The port's Language.dylib has no PE resources, so templates 3005/3006 are missing.
+		// Offer the Continue/Stop choice queue.cpp uses when there is no network.
+		DebugString("The out-of-sync dialog template is unavailable; asking with a plain box\n");
+		int const choice = WWMessageBox().Process(TXT_OUT_OF_SYNC, TXT_CONTINUE, TXT_STOP);
+		outcome = (choice == 0) ? OutcomeType::Continue : OutcomeType::Quit;
 	} else {
 		while (true) {
 			Call_Back();

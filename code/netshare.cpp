@@ -44,6 +44,7 @@
 #include "xstraw.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <ctime>
 
 
@@ -675,9 +676,17 @@ void SendPublicGameopts(char const * options)
 	packet.Options.NameCRC = Compute_Name_CRC(Session.GameName);
 	for (int i = 1; i < Session.Players.Count(); i++) {
 		DebugString("Sending public game options to %s\n", Session.Players[i]->Name);
+		{ FILE *lf = fopen("/tmp/opents_lan.log", "a");
+		  if (lf) { fprintf(lf, "[LAN] gameopt to %s at %s\n", Session.Players[i]->Name, Session.Players[i]->Address.As_String()); fclose(lf); } }
 		Ipx.Send_Global_Message(&packet, sizeof(packet), 1, &Session.Players[i]->Address);
 		Call_Back();
 	}
+
+	// Fan the same options out through the transport's broadcast list too.
+	// On a LAN that filters broadcasts this list is the configured peer
+	// addresses, so a guest whose recorded address turned out to be stale or
+	// unreachable still receives them. This copy needs no ACK.
+	Ipx.Send_Global_Message(&packet, sizeof(packet), 0, NULL);
 }
 
 
@@ -976,6 +985,20 @@ bool DecodePubGameopt(char * options, char * name)
 		}
 	}
 
+	// A guest that already knows the host's map must be able to accept even
+	// when this packet repeated identical options and nothing above fired.
+	{
+		HWND guest = WS_Find_Dialog(IDD_MPLAYER_GUEST);
+		if (guest != NULL) {
+			SendDlgItemMessage(guest, IDC_SCENARIONAME, WM_SETTEXT, 0, (LPARAM)Session.Options.ScenarioDescription);
+			if (Session.Options.ScenarioDescription[0] != '\0' &&
+				!IsWindowEnabled(GetDlgItem(guest, IDC_ACCEPT))) {
+				EnableWindow(GetDlgItem(guest, IDC_ACCEPT), TRUE);
+				InvalidateRect(GetDlgItem(guest, IDC_ACCEPT), NULL, FALSE);
+			}
+		}
+	}
+
 	SendDlgItemMessage(GameoptWindow(), IDC_USERS, OD_DISABLEPAINT, 0, 0);
 
 	Net2DisplayUsers();
@@ -1222,7 +1245,12 @@ INT_PTR CALLBACK Scenario_DlgProc(HWND window, UINT message, WPARAM wparam, LPAR
 					int index = SendDlgItemMessage(window, IDC_AILEVEL_SLIDER, LB_GETCURSEL, 0, 0);
 					Session.Options.ScenarioIndex = std::max(0, index);
 					WS_Destroy_Dialog(window, IDOK);
-					SendDlgItemMessage(GameoptWindow(), IDC_SCENARIONAME, WM_SETTEXT, 0, (LPARAM)Session.Scenarios[Session.Options.ScenarioIndex]);
+					// Pass the scenario's display name, not the MultiMission*
+					// itself -- WM_SETTEXT treats the LPARAM as a const char*.
+					SendDlgItemMessage(GameoptWindow(), IDC_SCENARIONAME, WM_SETTEXT, 0,
+						(LPARAM)(Session.Scenarios[Session.Options.ScenarioIndex]
+							? Session.Scenarios[Session.Options.ScenarioIndex]->Description()
+							: ""));
 					break;
 				}
 

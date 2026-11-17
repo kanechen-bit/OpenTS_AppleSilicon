@@ -252,6 +252,12 @@ correctly.
 
 ### What running the menu does not mean
 
+This describes the headless stage only. Cocoa events are now translated into the
+port's message queue by `port_window.mm`; real key, mouse and routed-click input
+reaches the engine. The gaps below were true at this stage and are kept as the
+record of what that first build proved. The current state is in
+[docs/apple-silicon-port.md](../../docs/apple-silicon-port.md).
+
 The binary starts, opens a composited window, brings up Metal, allocates its
 surfaces, mounts every archive, loads its rules and both theaters, and renders
 the main menu. It is still a long way from playable, and the gap is specific:

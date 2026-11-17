@@ -32,6 +32,7 @@ enum class SocketError
 	WOULD_BLOCK,
 	RESET,
 	MESSAGE_SIZE,
+	UNREACHABLE,
 	OTHER
 };
 

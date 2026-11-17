@@ -32,6 +32,7 @@
 #include "mapgen.h"
 #include "mplayer.h"
 #include "msgbox.h"
+#include "netdiag.h"
 #include "netdlg.h"
 #include "netshare.h"
 #include "newmenu.h"
@@ -727,6 +728,12 @@ bool Net2Remote_Connect(void)
 	JoinState = JOIN_NOTHING;
 	Net2IsGameListActive = true;
 
+	// Diagnostics for this lobby session: once a few seconds in, say what the
+	// transport actually managed, so a lobby that shows nothing comes with a
+	// reason instead of silence.
+	unsigned long const lobby_started = TickCount;
+	bool lobby_diag_done = false;
+
 	//------------------------------------------------------------------------
 	// Keep looping until something useful happens.
 	//------------------------------------------------------------------------
@@ -754,8 +761,41 @@ bool Net2Remote_Connect(void)
 			Call_Back();
 			{ static int _hbc = 0; if ((_hbc++ % 1000) == 0) {
 				FILE *lf = fopen("/tmp/opents_lan.log", "a");
-				if (lf) { fprintf(lf, "[LAN] lobby iter=%d _netresponse=%d\n", _hbc, _netresponse); fflush(lf); fclose(lf); }
+				if (lf) { fprintf(lf, "[LAN] lobby iter=%d _netresponse=%d sendok=%lu sendblocked=%lu senderr=%lu recv=%lu selfdrop=%lu lasterrno=%d\n", _hbc, _netresponse, LanDiag::Send_Ok, LanDiag::Send_Blocked, LanDiag::Send_Errors, LanDiag::Recv_Raw, LanDiag::Recv_Dropped_Self, LanDiag::Last_Send_Errno); fflush(lf); fclose(lf); }
 			} }
+
+			/*
+			** One-time transport diagnosis, a few seconds into the lobby. The
+			** counts say which macOS permission is missing, which is the usual
+			** reason a lobby shows no games and no other players.
+			*/
+			if (!lobby_diag_done && (TickCount - lobby_started) > 5 * TIMER_SECOND) {
+				lobby_diag_done = true;
+
+				{ FILE *lf = fopen("/tmp/opents_lan.log", "a");
+				  if (lf) {
+					fprintf(lf, "[LAN] diag: sendok=%lu sendblocked=%lu senderr=%lu recv=%lu selfdrop=%lu lasterrno=%d\n", LanDiag::Send_Ok, LanDiag::Send_Blocked, LanDiag::Send_Errors, LanDiag::Recv_Raw, LanDiag::Recv_Dropped_Self, LanDiag::Last_Send_Errno);
+					if (LanDiag::Send_Blocked > 0) {
+						fprintf(lf, "[LAN] verdict: macOS refused sends. Grant Local Network access to OpenTS in System Settings.\n");
+					} else if (LanDiag::Recv_Raw <= LanDiag::Recv_Dropped_Self) {
+						fprintf(lf, "[LAN] verdict: no packets from a peer. Allowed sends: yes. Check firewall and Local Network on BOTH Macs, VPN off.\n");
+						fprintf(lf, "[LAN] verdict: broadcasts may be filtered. Put the other Mac IP, one per line, in LAN_Peers.txt in the user directory.\n");
+					} else {
+						fprintf(lf, "[LAN] verdict: peer traffic received.\n");
+					}
+					fflush(lf); fclose(lf);
+				  } }
+
+				// The message box draws one line only, so it carries the short
+				// form; the log above carries the full instructions.
+				if (LanDiag::Send_Blocked > 0) {
+					WWMessageBox().Process("Local Network access denied - grant it in Settings.", TXT_OK);
+				} else if (LanDiag::Recv_Raw <= LanDiag::Recv_Dropped_Self) {
+					// Our own all-ones broadcasts loop back on macOS, so "recv > 0"
+					// alone does not mean a peer was heard. All-self is still silence.
+					WWMessageBox().Process("No peer traffic. Add IPs to LAN_Peers.txt.", TXT_OK);
+				}
+			}
 			if (_netresponse != 0) {
 				break;
 			}
@@ -1835,18 +1875,18 @@ INT_PTR CALLBACK MPlayer_Host_Dialog_Proc(HWND window, UINT message, WPARAM wpar
 					Update_Network_Dialog_Preview(window);
 				}
 
-				PumpGameopts(1, 0);
+				PumpGameopts(true, true);
 				InvalidateRect(window, NULL, FALSE);
-			} else {
-				if (!Set_Scenario_Info_From_Index(Session.Options.ScenarioIndex)) {
-					Session.Options.ScenarioIndex = old;
-				}
-				IsRandomMap = true;
-				ShowWindow(window, SW_SHOW);
+		} else {
+			if (!Set_Scenario_Info_From_Index(Session.Options.ScenarioIndex)) {
+				Session.Options.ScenarioIndex = old;
+			}
+			IsRandomMap = true;
+			ShowWindow(window, SW_SHOW);
 
-				SendDlgItemMessage(window, IDC_SCENARIONAME, WM_SETTEXT, 0, (LPARAM)Session.Options.ScenarioDescription);
+			SendDlgItemMessage(window, IDC_SCENARIONAME, WM_SETTEXT, 0, (LPARAM)Session.Options.ScenarioDescription);
 
-				if (!stricmp((char *)Session.Scenarios[Session.Options.ScenarioIndex] + DESCRIP_MAX, "RandMap.Sed")) {
+			if (!stricmp((char *)Session.Scenarios[Session.Options.ScenarioIndex] + DESCRIP_MAX, "RandMap.Sed")) {
 					if (MultiplayerMapPreview != NULL) {
 						delete MultiplayerMapPreview;
 					}
@@ -1859,6 +1899,11 @@ INT_PTR CALLBACK MPlayer_Host_Dialog_Proc(HWND window, UINT message, WPARAM wpar
 				} else {
 					Update_Network_Dialog_Preview(window);
 				}
+
+				// A normal (non-random) map choice never forced a send of its
+				// own; the guest waited up to two seconds, or longer if the
+				// options were otherwise unchanged. Push the new name at once.
+				PumpGameopts(true, true);
 			}
 
 			return(0);
@@ -2581,6 +2626,7 @@ static void Get_Join_Responses(void)
 			if ( JoinState != JOIN_CONFIRMED) {
 				JoinState = JOIN_CONFIRMED;
 				strcpy (Session.GameName, Session.GPacket.Name);
+				Session.HostAddress = Session.GAddress;
 				Session.House = Session.GPacket.PlayerInfo.House;
 				Session.ColorIdx = Session.GPacket.PlayerInfo.Color;
 
@@ -2705,14 +2751,29 @@ static void Get_Join_Responses(void)
 		}
 
 		if (Session.GPacket.Command==NET_PUB_GAMEOPT) {
+			bool from_host = false;
 			for (i = 0; i < Session.Players.Count(); i++) {
 				if (!strcmp(Session.Players[i]->Name,Session.GPacket.Name)) {
-					if (i != -1 && !Net2GameStarted) {
-						Session.HostAddress = Session.GAddress;
-						DecodePubGameopt(Session.GPacket.Options.Buf, Session.GPacket.Name);
-					}
+					from_host = true;
 					break;
 				}
+			}
+
+			// Right after NET_CONFIRM_JOIN the guest's player vector holds only
+			// itself; the host is learned from the player queries that follow.
+			// Options that arrive in that window are still valid: the game name
+			// is the host's handle, and the sender is the host we just joined.
+			if (!from_host && JoinState >= JOIN_CONFIRMED &&
+				(!stricmp(Session.GPacket.Name, Session.GameName) || Session.GAddress == Session.HostAddress)) {
+				from_host = true;
+			}
+
+			{ FILE *lf = fopen("/tmp/opents_lan.log", "a");
+			  if (lf) { fprintf(lf, "[LAN] gameopt from '%s' %s (players=%d state=%d)\n", Session.GPacket.Name, from_host ? "accepted" : "ignored", Session.Players.Count(), (int)JoinState); fclose(lf); } }
+
+			if (from_host && !Net2GameStarted) {
+				Session.HostAddress = Session.GAddress;
+				DecodePubGameopt(Session.GPacket.Options.Buf, Session.GPacket.Name);
 			}
 			continue;
 		}
@@ -3366,7 +3427,17 @@ INT_PTR CALLBACK MPlayer_Guest_Dialog_Proc(HWND window, UINT message, WPARAM wpa
 		}
 
 		_Net2DisplayUsers();
-		Session.Options.ScenarioDescription[0] = '\0';
+
+		// Options may already have arrived before this dialog existed. Keep
+		// what the host sent instead of wiping it, show its map name, and leave
+		// Accept usable rather than waiting for a change that never comes.
+		char const * shown = Session.Options.ScenarioDescription[0] != '\0'
+			? Session.Options.ScenarioDescription : "None";
+		SendDlgItemMessage(window, IDC_SCENARIONAME, WM_SETTEXT, 0, (LPARAM)shown);
+		if (Session.Options.ScenarioDescription[0] != '\0') {
+			EnableWindow(GetDlgItem(window, IDC_ACCEPT), TRUE);
+			InvalidateRect(GetDlgItem(window, IDC_ACCEPT), NULL, FALSE);
+		}
 
 		return(0);
 	}

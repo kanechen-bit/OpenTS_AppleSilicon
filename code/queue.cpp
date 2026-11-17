@@ -82,6 +82,7 @@
 #include "_map.h"
 #include "_mono.h"
 #include "_rtti.h"
+#include "_palette.h"
 #include "_rules.h"
 #include "_script.h"
 #include "_surface.h"
@@ -100,6 +101,7 @@
 #include "bullet.h"
 #include "bullettype.h"
 #include "cell.h"
+#include "ccfile.h"
 #include "connmgr.h"
 #include "conquer.h"
 #include "crc.h"
@@ -135,9 +137,11 @@
 #include "overtype.h"
 #include "ownrdraw.h"
 #include "particle.h"
+#include "pcx.h"
 #include "partsys.h"
 #include "psystype.h"
 #include "ptype.h"
+#include "video.h"
 #include "rules.h"
 #include "savemgr.h"
 #include "scenario.h"
@@ -325,6 +329,7 @@ static int Handle_Timeout(ConnManClass *net, FrameSyncStruct *their);
 static void Stop_Game(bool=false);
 INT_PTR CALLBACK Reconnect_Dialog_Proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 static void Close_Reconnect_Dialog(void);
+void Draw_Sync_Bars(HWND window);
 void Kick_Player_Now(ConnManClass *net, int kickee, FrameSyncStruct * their, bool error);
 bool Cast_Kick_Vote(int kicker, int kickee);
 void Multiplayer_Debug_Print(bool noframecheck);
@@ -1482,6 +1487,24 @@ static RetcodeType Wait_For_Players(int first_time, ConnManClass *net,
 			Map.Render();
 		}
 
+		/*
+		 * The reconnect dialog does not go through WS_Wait_Dialog, so nothing
+		 * else composites it. Without this the parent's WM_PAINT is the only
+		 * thing that runs: the backdrop and the sync bars appear, but none of
+		 * the child controls -- player names, "Time allowed", the help text and
+		 * Cancel -- are ever painted. Present the whole tree each pass, then
+		 * put the bars back on top of it.
+		 */
+		if (reconnect_dlg && SpecialDialog == SDLG_NONE) {
+			HWND dialog = WS_Find_Dialog(IDD_MPLAYER_DISCONNECT);
+			if (dialog != NULL) {
+				OwnerDraw::Dialog_Present();
+				Draw_Sync_Bars(dialog);
+				Video_Mark_Dirty();
+				Video_Present_If_Dirty();
+			}
+		}
+
 		loop_count++;
 
 	}	/* end of while */
@@ -2476,6 +2499,10 @@ void Draw_Sync_Bars(HWND window)
 		unsigned progress;
 		if (i == 0) {
 			progress = 0;
+		} else if (playerid < 0 || playerid >= MAX_PLAYERS - 1) {
+			// A connection that is already being torn down has no frame-sync
+			// record; show it as fully stalled rather than indexing past it.
+			progress = 1200;
 		} else {
 			progress = SyncWaitElapsed - SyncBarFrameSync[playerid].timing;
 		}
@@ -2491,7 +2518,13 @@ void Draw_Sync_Bars(HWND window)
 		int w = std::max(100 - (int)(100 * progress / 1200), 0) * bar_rect.Width;
 		bar_rect.Width = std::max(6, w / 100);
 
-		AlternateSurface->Fill_Rect(AlternateSurface->Get_Rect(), bar_rect, color);
+		// The bars are drawn after Dialog_Present has composited the dialog
+		// tree, so they go straight onto the visible surface. Drawing them into
+		// AlternateSurface here would put them underneath the child controls,
+		// which paint after their parent in the tree walk.
+		if (VisibleSurface != NULL) {
+			VisibleSurface->Fill_Rect(VisibleSurface->Get_Rect(), bar_rect, color);
+		}
 	}
 }
 
@@ -2775,7 +2808,6 @@ INT_PTR CALLBACK Reconnect_Dialog_Proc(HWND window, UINT message, WPARAM wparam,
 
 		case WM_PAINT:
 			OwnerDraw::Draw_Dialog_Back(window);
-			Draw_Sync_Bars(window);
 			ValidateRect(window, NULL);
 			break;
 

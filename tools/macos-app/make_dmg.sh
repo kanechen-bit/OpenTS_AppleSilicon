@@ -49,6 +49,7 @@ mkdir -p "$staging"
 # round trip through a disk image.
 cp -R "$bundle" "$staging/"
 cp "$script_dir/DMG_README.txt" "$staging/README.txt"
+cp "$script_dir/lan_probe.py" "$staging/lan_probe.py"
 
 # A symlink to Applications, which is what makes the window a drag-and-drop
 # target rather than something the user has to open and copy by hand.
@@ -155,7 +156,7 @@ verify_device=$(hdiutil info | awk -v img="$dmg" '
 	found && $1 ~ /^\/dev\/disk/ { print $1; exit }
 ')
 
-for expected in "$app_name.app" README.txt Applications; do
+for expected in "$app_name.app" README.txt lan_probe.py Applications; do
 	if [ ! -e "$verify_mount/$expected" ]; then
 		echo "make_dmg.sh: $expected is missing from the image" >&2
 		missing=1
@@ -184,7 +185,7 @@ rm -rf "$staging"
 echo
 echo "make_dmg.sh: built $dmg"
 du -h "$dmg" | sed 's/^/  size     /'
-echo "  contents $app_name.app, README.txt, Applications (symlink)"
+echo "  contents $app_name.app, README.txt, lan_probe.py, Applications (symlink)"
 
 if [ -n "${OPENTS_NOTARY_PROFILE:-}" ]; then
 	echo "  signed with a Developer ID and notarized"

@@ -99,6 +99,7 @@ Everything the game writes goes to your user folder, not into the application:
       SUN.INI              settings
       Saved Games/         your saved games
       Debug/               a log per run, kept for 14 days
+      LAN_Peers.txt        optional LAN peer IPs (see TROUBLESHOOTING)
 
 Deleting that folder resets the settings and loses your saved games. Nothing
 outside it is written, so removing the app leaves your saves alone.
@@ -124,6 +125,135 @@ It runs slowly
     renderer needs the graphics core, and some browsers and video apps take
     it while they are playing.
 
+The guest shows "Map: None" and its Accept button does nothing
+    The host's game options (including the chosen map) are sent over the
+    network as soon as a player joins and again whenever an option changes.
+    This build fixes three things that could leave a guest stuck there: the
+    options are now also fanned out through LAN_Peers.txt, they are accepted
+    even if they arrive before the guest has learned the full player list,
+    and opening the guest screen no longer wipes options that arrived early.
+    The host also pushes a new map name immediately instead of on the next
+    two-second tick.
+
+    If it still happens, check /tmp/opents_lan.log on both Macs:
+      host    "[LAN] gameopt to <name> at <ip>:<port>"
+      guest   "[LAN] gameopt from '<name>' accepted" (or "ignored")
+    A guest that only ever logs "ignored" or logs nothing is not receiving
+    the host's packets -- recheck LAN_Peers.txt and the firewall on both
+    Macs. A guest logging "accepted" but still showing "None" is a display
+    problem; send the log lines in when reporting it.
+
+A LAN game I hosted does not appear on the other Mac
+    This is almost always a macOS permission or a network that filters
+    broadcasts, not a game fault. LAN discovery broadcasts on UDP port 1234.
+    Do this on BOTH Macs:
+
+    1. If the LAN lobby shows a short "No peer traffic" or "Local Network
+       access denied" message, read /tmp/opents_lan.log: it ends each lobby
+       session with a "[LAN] diag:" line and a "[LAN] verdict:" line saying
+       what the game saw. That is the fastest way to tell which Mac is at
+       fault. (The message box only fits one line; the log has the details.)
+
+    2. Put each Mac's IP in LAN_Peers.txt. This is the reliable fix when
+       broadcasts are filtered (wireless client isolation, VPNs, guest
+       networks, or a firewall dropping unsolicited inbound UDP). The game
+       creates the file for you the first time you open the LAN lobby:
+
+           ~/Library/Application Support/OpenTS/LAN_Peers.txt
+
+       Add the OTHER Mac's IP, one per line, e.g.:
+
+           192.168.1.20
+
+       Find a Mac's IP with: ipconfig getifaddr en0
+       (or en1 for Ethernet), or System Settings > Wi-Fi > Details.
+       Do this on both Macs, then quit and relaunch the game -- the file is
+       read when the LAN lobby opens. Every discovery packet is then also
+       sent straight to those addresses, using the same UDP path the LAN
+       probe already proved works. To confirm, check /tmp/opents_lan.log for
+       "[LAN] peer added: <IP>:1234" on both machines.
+
+    3. System Settings > Privacy & Security > Local Network: switch OpenTS on.
+       If OpenTS is not listed, launch the game, choose Multiplayer >
+       Network (IPX) once, then check the list again. macOS adds an app after
+       its first attempt to reach the local network.
+    4. System Settings > Network > Firewall > Options: if the firewall is on,
+       add OpenTS and set it to "Allow incoming connections", or turn the
+       firewall off for the test. The app is signed ad-hoc, so the
+       "automatically allow signed software" option does not cover it.
+    5. Both Macs must be on the same IP subnet (for example 192.168.1.x) and
+       on a network that forwards broadcasts. Guest Wi-Fi, wireless isolation
+       (AP/client isolation), and VPN/proxy software that installs a TUN
+       interface suppress them: a full-tunnel VPN captures the 255.255.255.255
+       broadcast even when the LAN subnet itself is reachable. Turn the VPN
+       off for the test. Step 2 works even on networks that block broadcasts.
+    6. Quit and relaunch the game after changing any setting, then host
+       again. A permission granted while the game is running does not apply
+       to the socket it already opened.
+    7. This build is signed ad-hoc, so macOS may ask for Local Network access
+       again after every rebuild. A Developer ID signature gives it a stable
+       identity and makes the grant persist.
+
+    To confirm the network itself is carrying the traffic, run the LAN probe
+    on both Macs (see "Testing LAN reachability" below). If the probe sees
+    packets but the lobby is still empty, the fault is in the game; if it sees
+    nothing, it is a permission, firewall, or network-isolation problem.
+
+    NOTE on the probe: it runs under Terminal, which has its own Local Network
+    permission -- a working probe proves the NETWORK is fine, not that the
+    game's own permission was granted. macOS grants Local Network access per
+    application, so OpenTS has to be allowed separately.
+
+The lobby tells me what macOS blocked
+    The game diagnoses itself now. About five seconds after the LAN game-list
+    dialog opens, it checks what the network transport actually did:
+
+    - If macOS refused its sends, the game shows "Local Network access
+      denied". Grant access in System Settings > Privacy & Security >
+      Local Network, then relaunch.
+    - If every received packet came from this Mac itself, the game shows
+      "No peer traffic" and points at LAN_Peers.txt. That is the common
+      case: macOS delivers our own all-ones broadcast back to us, which
+      counts as received traffic but is not a peer.
+
+    Every lobby session also appends a line to /tmp/opents_lan.log like:
+
+      [LAN] diag: sendok=14 sendblocked=0 senderr=0 recv=25 selfdrop=25 lasterrno=0
+
+      sendok        datagrams the system accepted for sending
+      sendblocked   sends macOS refused (Local Network permission missing)
+      recv          datagrams received from the network, before any filtering
+      selfdrop      received datagrams that came from this Mac itself (normal:
+                    the all-ones broadcast loops back; a healthy lobby shows
+                    recv equal to selfdrop on a lone Mac)
+
+    A "[LAN] verdict:" line follows with the full instructions. The
+    "[LAN] peer added:" lines confirm that LAN_Peers.txt was read.
+
+    When both Macs sit in the lobby with empty lists, look at the verdict on
+    each: sendblocked>0 means the Local Network grant is missing on that Mac;
+    sendok>0 with recv==selfdrop on both means every cross-machine packet is
+    being dropped in transit -- the firewall allowlist, AP isolation, or
+    LAN_Peers.txt are the places to look. Send the /tmp/opents_lan.log lines
+    from both Macs when reporting the problem.
+
+Testing LAN reachability
+    lan_probe.py is in this disk image next to this README. On the first Mac,
+    in Terminal (drag the file into Terminal to get its path):
+
+        python3 /Volumes/OpenTS_AppleSilicon/lan_probe.py listen
+
+    On the second Mac:
+
+        python3 /Volumes/OpenTS_AppleSilicon/lan_probe.py send <first-Mac-IP>
+
+    Every two seconds the sender emits three probes on UDP 1234: a unicast to
+    the address given, a directed subnet broadcast, and the all-ones broadcast.
+    The listener prints each datagram it receives and totals them by kind, so
+    "unicast only" means broadcasts are being blocked while basic UDP works.
+    Neither command needs the game data or administrator rights. Stop with
+    Ctrl-C, then reverse the roles to test the other direction.
+
 
 WHAT WORKS, AND WHAT DOES NOT
 ----------------------------
@@ -135,8 +265,16 @@ Works:
   - the whole main menu, with music
 
 Not tested or not working:
-  - Multiplayer and CnCNet. The code compiles but has not been exercised on
-    this platform. Assume it does not work.
+  - Multiplayer on real LAN is not yet confirmed working. Two game instances
+    on one Mac can form a session, exchange commands, recover from a forced
+    desync, and reach the score screen using a local UDP relay. A two-Mac test
+    did not show the hosted lobby; the engine's own send and receive paths were
+    since verified working (the lobby now reports what macOS let through), so
+    the remaining suspects are the per-application Local Network grant and the
+    application firewall on the machines involved -- both are per-app and the
+    probe script runs under Terminal, whose grant does not carry over. See
+    "A LAN game I hosted does not appear on the other Mac" above. CnCNet has
+    not been exercised.
   - Intel Macs.
 
 Known limitation, on any platform:

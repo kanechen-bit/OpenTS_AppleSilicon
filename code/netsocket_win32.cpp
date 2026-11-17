@@ -67,6 +67,11 @@ SocketError Translate_Error(int error)
 		case WSAEWOULDBLOCK: return(SocketError::WOULD_BLOCK);
 		case WSAECONNRESET: return(SocketError::RESET);
 		case WSAEMSGSIZE: return(SocketError::MESSAGE_SIZE);
+		case WSAEHOSTDOWN:
+		case WSAEHOSTUNREACH:
+		case WSAENETDOWN:
+		case WSAENETUNREACH:
+		case WSAEADDRNOTAVAIL: return(SocketError::UNREACHABLE);
 		default: return(SocketError::OTHER);
 	}
 }

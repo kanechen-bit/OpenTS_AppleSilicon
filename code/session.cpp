@@ -672,6 +672,7 @@ void SessionClass::Read_Scenario_Descriptions(void)
 {
 	INIClass ini;
 	char name_buffer[64];
+	const char * list_source = "none";
 
 	// Clear the scenario description lists
 	for (int index = 0; index < Scenarios.Count(); index++) {
@@ -685,6 +686,7 @@ void SessionClass::Read_Scenario_Descriptions(void)
 	CCFileClass file("MISSIONS.PKT");
 	if (file.Is_Available()) {
 		ini.Load(file);
+		list_source = "MISSIONS.PKT file";
 		int count = ini.Entry_Count("MultiMaps");
 //DebugString( "Found %i missions in Missions.pkt\n", count );
 		for (int index = 0; index < count; index++) {
@@ -773,6 +775,7 @@ void SessionClass::Read_Scenario_Descriptions(void)
 			BufferStraw straw(idx, idxsize);
 			ini.Clear();
 			if (ini.Load(straw, false)) {
+				list_source = "mix scan";
 				int count = ini.Entry_Count("MultiMaps");
 				for (int index = 0; index < count; index++) {
 					if (ini.Get_String("MultiMaps", ini.Get_Entry("MultiMaps", index), "", name_buffer, sizeof(name_buffer))) {
@@ -785,6 +788,25 @@ void SessionClass::Read_Scenario_Descriptions(void)
 	}
 
 	DebugString("Read_Scenario_Descriptions: %d scenarios available.\n", Scenarios.Count());
+
+	/*
+	 * Ground-truth dump for the lobby map-name debugging: when OPENTS_DUMP_SCENARIOS
+	 * is set, write which index source was used and what each scenario resolved its
+	 * name to, so the value the lobby shows can be checked without a display.
+	 */
+	if (getenv("OPENTS_DUMP_SCENARIOS") != NULL) {
+		FILE * dump = fopen("/tmp/opents_scenarios.log", "w");
+		if (dump != NULL) {
+			fprintf(dump, "source=%s scenarios=%d\n", list_source, Scenarios.Count());
+			int limit = Scenarios.Count() < 14 ? Scenarios.Count() : 14;
+			for (int i = 0; i < limit; i++) {
+				fprintf(dump, "[%d] file='%s' desc='%s'\n", i,
+				        Session.Scenarios[i]->Get_Filename(),
+				        Session.Scenarios[i]->Description());
+			}
+			fclose(dump);
+		}
+	}
 
 	Options.ScenarioIndex = 0;
 }
@@ -1079,7 +1101,28 @@ MultiMission::MultiMission(INIClass const & ini, char const * name)
 		strcpy(Filename, name);
 		strcat(Filename, ".MAP");
 
+		// The name comes straight from the mission index (MISSIONS.PKT carries a
+		// per-map Description= for every standard map). Do NOT open the map file
+		// here: this constructor runs for every map whenever the scenario list is
+		// built, the map data lives inside large mix archives, and loading each
+		// file just for its [Basic] Name stalled the client for many seconds
+		// (join delay and "Packet received too late!" sync warnings in game).
 		ini.Get_String(name, "Description", "", ScenarioDescription, sizeof(ScenarioDescription));
+
+		// Cheap, no-I/O fallback for any index that lacks descriptions: the mission
+		// key itself (e.g. "COASTAL"), so the lobby label is never left blank.
+		if (ScenarioDescription[0] == '\0') {
+			size_t blen = strlen(name);
+			if (blen > 4 && (stricmp(name + blen - 4, ".MAP") == 0 ||
+			                   stricmp(name + blen - 4, ".MPR") == 0)) {
+				strncpy(ScenarioDescription, name, blen - 4);
+				ScenarioDescription[blen - 4] = '\0';
+			} else {
+				strncpy(ScenarioDescription, name, sizeof(ScenarioDescription) - 1);
+				ScenarioDescription[sizeof(ScenarioDescription) - 1] = '\0';
+			}
+		}
+
 		MinPlayers = ini.Get_Int(name, "MinPlayers", MinPlayers);
 		MaxPlayers = ini.Get_Int(name, "MaxPlayers", MaxPlayers);
 

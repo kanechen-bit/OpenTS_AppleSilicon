@@ -18,6 +18,7 @@
 #include "netsocket.h"
 
 #include "dbgprint.h"
+#include "netdiag.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -46,6 +47,15 @@ SocketError Translate_Error(int error)
 			return(SocketError::RESET);
 		case EMSGSIZE:
 			return(SocketError::MESSAGE_SIZE);
+		// The OS could not route the datagram to the destination at all -- most
+		// often a LAN neighbour whose machine has left the network, so the ARP
+		// for its address never resolves (EHOSTDOWN on macOS).
+		case EHOSTDOWN:
+		case EHOSTUNREACH:
+		case ENETDOWN:
+		case ENETUNREACH:
+		case EADDRNOTAVAIL:
+			return(SocketError::UNREACHABLE);
 		default:
 			return(SocketError::OTHER);
 	}
@@ -201,8 +211,20 @@ TransferResult PosixSocketClass::Send_To(void const * buffer, int length, IPXAdd
 	ssize_t const rc = sendto(Socket, buffer, static_cast<size_t>(length), 0,
 		reinterpret_cast<sockaddr const *>(&addr), sizeof(addr));
 
-	if (rc < 0) return(TransferResult{Translate_Error(errno), 0});
+	if (rc < 0) {
+		// macOS Local Network privacy refuses a local-network send the app was
+		// never granted; anything else is an ordinary transport failure.
+		if (errno == EPERM || errno == EACCES) {
+			LanDiag::Send_Blocked++;
+			DebugString("Local network send refused (errno %d) - the app is not allowed on the local network\n", errno);
+		} else {
+			LanDiag::Send_Errors++;
+		}
+		LanDiag::Last_Send_Errno = errno;
+		return(TransferResult{Translate_Error(errno), 0});
+	}
 
+	LanDiag::Send_Ok++;
 	return(TransferResult{SocketError::NONE, static_cast<int>(rc)});
 }
 
@@ -219,6 +241,7 @@ TransferResult PosixSocketClass::Receive_From(void * buffer, int length, IPXAddr
 
 	if (rc < 0) return(TransferResult{Translate_Error(errno), 0});
 
+	LanDiag::Recv_Raw++;
 	from.Set_Address(addr.sin_addr.s_addr, addr.sin_port);
 	return(TransferResult{SocketError::NONE, static_cast<int>(rc)});
 }

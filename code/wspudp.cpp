@@ -45,7 +45,11 @@
 
 #include "dbgprint.h"
 #include "netadmit.h"
+#include "netdiag.h"
+#include "stimer.h"
+#include "timer.h"
 #include "vector.h"
+#include "_timer.h"
 
 #include <cstdio>
 #include <cstring>
@@ -397,6 +401,15 @@ void UDPInterfaceClass::Broadcast (void *buffer, int buffer_len)
 	for ( int i=0 ; i<BroadcastAddresses.Count() ; i++ ) {
 
 		/*
+		**	A destination the OS cannot reach at the moment (a LAN_Peers entry whose
+		**	machine has left the network) is passed over entirely: sending to it is a
+		**	wasted datagram, and a failed one used to jam the whole send queue.
+		*/
+		if (Is_Target_Unreachable(*BroadcastAddresses[i])) {
+			continue;
+		}
+
+		/*
 		**	Create a temporary holding area for the packet.
 		*/
 		WinsockBufferType *packet = (WinsockBufferType *)Get_New_Out_Buffer();
@@ -429,6 +442,90 @@ void UDPInterfaceClass::Broadcast (void *buffer, int buffer_len)
 		OutBuffers.Add ( packet );
 
 		Send_Pending();
+	}
+}
+
+
+/***********************************************************************************************
+ * UDPInterfaceClass::Is_Target_Unreachable -- is this destination currently skipped?          *
+ *                                                                                             *
+ * Answers whether a recent send to this address failed with a routing error. An expired       *
+ * record is dropped here, so the next datagram to the target probes it again.                 *
+ *                                                                                             *
+ * INPUT:    the destination in question                                                       *
+ *                                                                                             *
+ * OUTPUT:   bool; true when the destination is inside its skip window                         *
+ ***********************************************************************************************/
+bool UDPInterfaceClass::Is_Target_Unreachable(IPXAddressClass const & address)
+{
+	unsigned long const now = (unsigned long)TickCount;
+
+	for (int i = 0; i < UnreachableTargets.Count(); i++) {
+		if (UnreachableTargets[i].IP != address.Get_IP() || UnreachableTargets[i].Port != address.Get_Port()) {
+			continue;
+		}
+
+		if ((long)(now - UnreachableTargets[i].Until) < 0) {
+			return(true);
+		}
+
+		// The skip window has passed -- retire the record and let the next send try.
+		UnreachableTargets.Delete_Index(i);
+		break;
+	}
+
+	return(false);
+}
+
+
+/***********************************************************************************************
+ * UDPInterfaceClass::Mark_Target_Unreachable -- stop aiming at a destination for a while      *
+ *                                                                                             *
+ * Called when a send failed with a routing error (macOS answers EHOSTDOWN when the ARP for    *
+ * a LAN neighbour never resolves). The address is skipped for half a minute, which keeps a    *
+ * machine that has left the network from flooding the transport with failing sends; the       *
+ * skip expires on its own so a machine that comes back rejoins without a restart.             *
+ *                                                                                             *
+ * INPUT:    the destination that just refused a datagram                                      *
+ *                                                                                             *
+ * OUTPUT:   Nothing                                                                           *
+ ***********************************************************************************************/
+void UDPInterfaceClass::Mark_Target_Unreachable(IPXAddressClass const & address)
+{
+	// The all-ones broadcast is never marked: blacklisting it would stop discovery
+	// outright, and it cannot fail with a routing error in the first place.
+	if (address.Get_IP() == 0xFFFFFFFF) {
+		return;
+	}
+
+	unsigned long const now = (unsigned long)TickCount;
+	unsigned long const until = now + 30 * TIMER_SECOND;
+
+	for (int i = 0; i < UnreachableTargets.Count(); i++) {
+		if (UnreachableTargets[i].IP == address.Get_IP() && UnreachableTargets[i].Port == address.Get_Port()) {
+			UnreachableTargets[i].Until = until;
+			return;
+		}
+	}
+
+	UnreachableTargets.Add(UnreachableTarget{address.Get_IP(), address.Get_Port(), until, false});
+
+	unsigned char octets[4];
+	unsigned long const ip = address.Get_IP();
+	memcpy(octets, &ip, sizeof(octets));
+	DebugString("UDP: peer %d.%d.%d.%d is unreachable - skipping it for 30 seconds\n",
+	            octets[0], octets[1], octets[2], octets[3]);
+
+	// The LAN log is what the troubleshooting instructions point at, so the skip
+	// is recorded there too: one line naming the peer that was dropped.
+	{
+		FILE * log = fopen("/tmp/opents_lan.log", "a");
+		if (log != NULL) {
+			fprintf(log, "[LAN] peer unreachable %d.%d.%d.%d:%d - skipping it for 30s\n",
+			        octets[0], octets[1], octets[2], octets[3], address.Get_Port());
+			fflush(log);
+			fclose(log);
+		}
 	}
 }
 
@@ -487,7 +584,10 @@ void UDPInterfaceClass::Receive_Pending(void)
 				break;
 			}
 		}
-		if (ours) continue;
+		if (ours) {
+			LanDiag::Recv_Dropped_Self++;
+			continue;
+		}
 
 		/*
 		**	Create a new buffer and store this packet in it.
@@ -538,10 +638,36 @@ void UDPInterfaceClass::Send_Pending(void)
 		TransferResult const sent = Send_To ( ((char const *)packet->Buffer) - sizeof(packet->CRC), packet->BufferLen + sizeof(packet->CRC), destination );
 
 		if (sent.Error != SocketError::NONE) {
-			if (sent.Error != SocketError::WOULD_BLOCK) {
-				Clear_Error();
+			if (sent.Error == SocketError::WOULD_BLOCK) {
+				/*
+				**	The socket is momentarily full. Leave the packet at the head
+				**	of the queue and try again on the next pass -- the ordinary
+				**	backpressure case.
+				*/
+				break;
 			}
-			break;
+
+			/*
+			**	The destination refused the datagram outright (an unreachable peer,
+			**	an oversized packet, a refused port). Drop it here and keep
+			**	draining: a failed packet that stays at the head jams every other
+			**	player's traffic behind one dead destination, which is what made
+			**	the lobby stall for seconds at a time. Anything that matters is
+			**	re-sent by the protocol layers above.
+			*/
+			if (sent.Error == SocketError::UNREACHABLE) {
+				Mark_Target_Unreachable(destination);
+			}
+			Clear_Error();
+
+			OutBuffers.Delete_Index(0);
+			if (packet->IsAllocated) {
+				delete packet;
+			} else {
+				packet->InUse = false;
+				OutBuffersUsed--;
+			}
+			continue;
 		}
 
 		OutBuffers.Delete_Index(0);

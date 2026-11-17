@@ -33,8 +33,8 @@ import sys
 from ds_store import DSStore, DSStoreEntry
 
 # Points from the window's top-left. The app sits top-left, the Applications
-# symlink to its right, and the README underneath: read left to right, it is
-# "here is the app, here is where it goes, here is what to read".
+# symlink to its right, and the README and LAN probe underneath: read left to
+# right, it is "here is the app, here is where it goes, here is what to read".
 #
 # The names must match what make_dmg.sh put in the image. The app is named with
 # underscores because that is what the bundle is called, and the Finder shows
@@ -44,6 +44,7 @@ POSITIONS = {
     "OpenTS_AppleSilicon.app": (150, 190),
     "Applications": (430, 190),
     "README.txt": (150, 330),
+    "lan_probe.py": (430, 330),
 }
 
 # The icon-view rectangle, as (x, y, width, height) in the window.

@@ -115,9 +115,20 @@ them:
 
 - **Intel Macs are not supported.** The shim assumes LP64 and arm64. A Rosetta
   translation of a 32-bit engine was not attempted.
-- **Multiplayer and CnCNet are untested.** The network code is upstream's and
-  compiles, but it has not been exercised on this platform. Assume it does not
-  work.
+- **Two-machine LAN play is unverified.** A single-host session with two engine
+  instances does work: a local UDP relay carries the tunnel transport, both
+  instances load the same map, exchange commands, detect a forced checksum
+  mismatch, recover, and reach the score screen. A two-Mac test did not show a
+  hosted lobby. The engine side is sound — `Configure_LAN` enables broadcasting,
+  the socket binds UDP 1234, `NET_QUERY_GAME` is broadcast every two seconds and
+  the host answers with `NET_ANSWER_GAME` — but macOS 15+ gates both the outgoing
+  UDP broadcast and the incoming one behind the Local Network privacy permission
+  (Apple [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)).
+  The bundle had no `NSLocalNetworkUsageDescription`, and the application
+  firewall is enabled with no rule for an ad-hoc-signed app. Both Macs must grant
+  Local Network access and allow incoming connections. The key is now declared;
+  a successful two-Mac lobby has still not been observed. The CnCNet service has
+  not been exercised.
 - **Some subsystems are thinner than on Windows.** Dialogs and file pickers in
   particular: the engine draws its own UI from Win32 resources, which the port
   supplies, but anything that wanted a *native* control has a stub rather than an
@@ -125,8 +136,10 @@ them:
 - **The World Domination Tour cannot work on any platform.** Its servers are gone.
   It is disabled in the menu deliberately — see
   [game-data-requirements.md](game-data-requirements.md).
-- **Only single-player has been played through.** Campaign, skirmish and
-  save/load work; the rest is inference from the code compiling.
+- **No scenario has been played through by a person.** Interactive input (real
+  key, mouse and routed-click events), gameplay command execution, desync
+  detection and recovery, and the score screen have been exercised in targeted
+  runs, but the simulation and in-game present path are not proven playable.
 
 ## A bug worth knowing about
 

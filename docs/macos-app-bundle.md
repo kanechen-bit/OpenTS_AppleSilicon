@@ -17,8 +17,39 @@ engine still builds with nothing but a compiler and CMake.
 
 `make_dmg.sh` calls `make_app.sh` itself, then wraps the result in a disk image
 along with `DMG_README.txt` — a plain-text README for the player, not the
-developer documentation in `docs/` — and an `/Applications` symlink. It mounts the
-finished image and checks the contents and the signature before reporting success.
+developer documentation in `docs/` — `lan_probe.py`, a standalone two-Mac UDP
+reachability check, and an `/Applications` symlink. It mounts the finished image
+and checks the contents and the signature before reporting success.
+
+## LAN lobby diagnostics
+
+macOS gates the local network per application, and both gates fail silently: a
+send refused by Local Network privacy reports EPERM which the transport used to
+swallow, and the application firewall drops incoming datagrams without a trace.
+An empty LAN lobby therefore said nothing about why.
+
+`code/netdiag.h` / `code/netdiag.cpp` carry the `LanDiag` counters the POSIX
+transport bumps (`Send_Ok`, `Send_Blocked` for EPERM/EACCES, `Send_Errors`,
+`Recv_Raw`, `Recv_Dropped_Self`, `Last_Send_Errno`), reset by
+`IPXManagerClass::Configure_LAN`. The LAN lobby (`Net2Remote_Connect`) reports
+them twice: a heartbeat line and a one-time `[LAN] diag:` line in
+`/tmp/opents_lan.log`, and five seconds in it tells the player in a dialog when
+macOS refused a send (Local Network grant missing) or when nothing arrived at
+all (firewall, VPN, isolation). On a lone Mac `recv` equals `selfdrop` because
+the all-ones broadcast loops back to the sender; a healthy cross-machine lobby
+is the only place `recv` exceeds `selfdrop`.
+
+`IPXManagerClass::Configure_LAN` also reads `LAN_Peers.txt` from the user
+directory (one IPv4 address per line, `#` comments) and `OPENTS_LAN_PEERS`
+(comma/space separated) and adds each address through `Add_Peer`, so every
+discovery broadcast is also sent straight to those hosts. Networks that pass
+unicast UDP but filter broadcasts — wireless client isolation, VPNs, guest
+networks, or a firewall dropping unsolicited inbound datagrams — can still
+form a lobby this way. A commented template is created on the first LAN lobby
+if the file is missing, and each accepted address is recorded in
+`/tmp/opents_lan.log` as `[LAN] peer added:`. The direct-peer fan-out itself
+is the mechanism the single-Mac spawn tests already exercised; this just
+exposes it to a normal LAN session.
 
 ## What is in the bundle
 
@@ -78,6 +109,12 @@ have to be waited on and reaped, and the game would be quitting its parent.
 `-W` is the one the engine did not have: `-WIN` already existed, and `-W` was
 added as the short form (`code/init.cpp`) because a launcher building its own
 command line has room for the shorter switch.
+
+`Info.plist` declares `NSLocalNetworkUsageDescription`. LAN discovery broadcasts
+UDP port 1234, which macOS 15+ treats as a local network operation requiring the
+player's consent. Without the key the system has no text for the consent alert
+and the discovery traffic can be blocked; see
+[apple-silicon-port.md](apple-silicon-port.md) for the two-Mac findings.
 
 **Windowed is the default** and not a preference. On macOS the borderless full
 screen the game asks for puts the player in a separate Space they have to swipe

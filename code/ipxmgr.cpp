@@ -69,8 +69,10 @@
 #include "_surface.h"
 #include "dbgprint.h"
 #include "dialog.h"
+#include "gamedirs.h"
 #include "globals.h"
 #include "house.h"
+#include "netdiag.h"
 #include "queue.h"
 #include "scheme.h"
 #include "session.h"
@@ -79,6 +81,12 @@
 #include "surface.h"
 #include "vector.h"
 #include "wsproto.h"
+
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <winsock.h>
 #include "wspudp.h"
 
 #include <algorithm>
@@ -204,9 +212,96 @@ IPXManagerClass::~IPXManagerClass(void)
 /// the players answering are recorded at the address their packets came from.
 /// </summary>
 /// <param name="port">UDP port to play over, or zero to take the default one.</param>
+/// <summary>
+/// Names peers that discovery must also reach by unicast.
+/// Some networks carry unicast UDP but suppress broadcasts (wireless client
+/// isolation, VPNs, guest networks, and firewalls that drop unsolicited
+/// inbound datagrams). Every packet the LAN transport broadcasts is fanned out
+/// to the addresses here as well, so a game can still be found on those
+/// networks. Addresses come from LAN_Peers.txt in the user directory -- one
+/// IPv4 address per line, '#' starts a comment -- and from OPENTS_LAN_PEERS,
+/// a comma- or space-separated list, which is handy for scripted tests.
+/// </summary>
+static void Add_Configured_LAN_Peers(IPXManagerClass & ipx, unsigned short port)
+{
+	int added = 0;
+
+	auto add_one = [&](char const * text) {
+		while (*text != '\0' && std::isspace(static_cast<unsigned char>(*text))) text++;
+		if (*text == '\0' || *text == '#') return;
+
+		char ip[64];
+		size_t n = 0;
+		while (*text != '\0' && n + 1 < sizeof(ip)
+			&& !std::isspace(static_cast<unsigned char>(*text)) && *text != ',') {
+			ip[n++] = *text++;
+		}
+		ip[n] = '\0';
+
+		unsigned long const address = inet_addr(ip);
+		if (address == INADDR_NONE || address == 0) return;
+
+		// The transport keeps IP and port in network byte order.
+		IPXAddressClass const peer(static_cast<uint32_t>(address), htons(port));
+		ipx.Add_Peer(peer);
+		added++;
+
+		DebugString("LAN peer added: %s:%u\n", ip, static_cast<unsigned>(port));
+		{ FILE *lf = fopen("/tmp/opents_lan.log", "a");
+		  if (lf) { fprintf(lf, "[LAN] peer added: %s:%u\n", ip, static_cast<unsigned>(port)); fflush(lf); fclose(lf); } }
+	};
+
+	char const * const env = getenv("OPENTS_LAN_PEERS");
+	if (env != nullptr && env[0] != '\0') {
+		size_t const length = strlen(env);
+		char * copy = new char[length + 1];
+		memcpy(copy, env, length + 1);
+
+		for (char * p = copy; *p != '\0'; p++) {
+			if (*p == ',' || std::isspace(static_cast<unsigned char>(*p))) *p = '\0';
+		}
+		char * start = copy;
+		char const * const end = copy + length;
+		while (start <= end) {
+			if (*start != '\0') add_one(start);
+			start += strlen(start) + 1;
+		}
+		delete[] copy;
+	}
+
+	std::string const path = User_File_Write_Name("LAN_Peers.txt");
+	FILE * file = fopen(path.c_str(), "r");
+	if (file != nullptr) {
+		char line[256];
+		while (fgets(line, sizeof(line), file) != nullptr) {
+			add_one(line);
+		}
+		fclose(file);
+	} else {
+		// Leave a template behind so the option is discoverable: the player
+		// only has to open this file and add the other machine's address.
+		FILE * created = fopen(path.c_str(), "w");
+		if (created != nullptr) {
+			fputs("# OpenTS LAN peers - one IPv4 address per line.\n"
+				  "# Add the IP of each Mac you want to find, then relaunch.\n"
+				  "# Example: 192.168.1.20\n"
+				  "# Lines starting with # are ignored.\n", created);
+			fclose(created);
+		}
+		DebugString("LAN peers: no %s (template created)\n", path.c_str());
+	}
+
+	{ FILE *lf = fopen("/tmp/opents_lan.log", "a");
+	  if (lf) { fprintf(lf, "[LAN] peers=%d file=%s\n", added, path.c_str()); fflush(lf); fclose(lf); } }
+}
+
+
 void IPXManagerClass::Configure_LAN(unsigned short port)
 {
 	Shutdown();
+
+	// The lobby's transport diagnostics cover this session only.
+	LanDiag::Reset();
 
 	if (port == 0) {
 		port = static_cast<unsigned short>(WestwoodOnline_PortNumber);
@@ -219,6 +314,8 @@ void IPXManagerClass::Configure_LAN(unsigned short port)
 
 	PacketTransport = udp;
 	TransportMode = TRANSPORT_LAN;
+
+	Add_Configured_LAN_Peers(*this, port);
 }
 
 
