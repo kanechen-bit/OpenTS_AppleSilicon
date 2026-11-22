@@ -23,35 +23,7 @@
 #include <cstring>
 #include <string>
 
-// OpenTS diag probe (temporary, remove before clean build): crash backtrace.
-#include <execinfo.h>
-#include <signal.h>
-#include <stdio.h>
-#include <unistd.h>
-
-static void opents_port_crash_handler(int sig)
-{
-	// Re-arm nothing; just record where we died and get out.
-	FILE *f = fopen("/tmp/opents_crash.txt", "w");
-	if (f != NULL) {
-		fprintf(f, "OpenTS crash: signal %d\n", sig);
-		fflush(f);
-		void *bt[64];
-		int n = backtrace(bt, 64);
-		backtrace_symbols_fd(bt, n, fileno(f));
-		fclose(f);
-	}
-	_exit(99);
-}
-
-static void opents_port_install_crash_handler(void)
-{
-	signal(SIGSEGV, opents_port_crash_handler);
-	signal(SIGBUS, opents_port_crash_handler);
-	signal(SIGABRT, opents_port_crash_handler);
-	signal(SIGILL, opents_port_crash_handler);
-	signal(SIGFPE, opents_port_crash_handler);
-}
+#include "except.h"
 
 /*
  * Declared here rather than through a header so that the Win32 build does not
@@ -62,8 +34,7 @@ extern int WinMain(void *instance, void *previous, char *command_line, int comma
 
 int main(int argc, char **argv)
 {
-	// OpenTS diag probe (temporary, remove before clean build):
-	opents_port_install_crash_handler();
+	Install_Exception_Handler();
 
 	/*
 	 * Rebuild the command line the loader would have supplied, so that the

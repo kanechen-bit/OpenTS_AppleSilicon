@@ -2107,16 +2107,22 @@ void UnitClass::Per_Cell_Process(PCPType why)
 			Cell center = Center_Coord();
 			Cell whom_center = whom->Center_Coord();
 			if (Center_Coord().As_Cell() == whom->Center_Coord().As_Cell() && whom->RTTI == RTTI_BUILDING) {
-				IPersistPtr persist(Locomotion);
-				CLSID clsid;
-				persist->GetClassID(&clsid);
+				CLSID clsid = CLSID_NULL;
+				if (Locomotion != NULL) {
+					IPersistPtr persist(Locomotion);
+					if (persist != NULL) {
+						persist->GetClassID(&clsid);
+					}
+				}
 				if (clsid == CLSID_HoverLocomotion && static_cast<BuildingClass *>(whom)->Class->IsCanUnitRepair && NavCom == NULL) {
 					NavCom = whom;
 				}
 				if (whom == NavCom) {
 					BASECLASS::Per_Cell_Process(PCP_END);
 					Transmit_Message(RADIO_IM_IN);
-					Locomotion->Power_Off();
+					if (Locomotion != NULL) {
+						Locomotion->Power_Off();
+					}
 					BEnd(BENCH_PCP);
 					return;
 				}
@@ -5251,10 +5257,12 @@ void UnitClass::Assign_Destination(AbstractClass * target, bool immediate)
 	 * Subterranean units prepend their navigation target onto the queue and
 	 * re-target the nearest reachable cell when driving rather than burrowing.
 	 */
-	if (target != NULL && Class->IsSubterranean && Locomotion->Is_Moving()) {
+	if (target != NULL && Class->IsSubterranean && Locomotion != NULL && Locomotion->Is_Moving()) {
+		CLSID clsid = CLSID_NULL;
 		IPersistPtr persist(Locomotion);
-		CLSID clsid;
-		persist->GetClassID(&clsid);
+		if (persist != NULL) {
+			persist->GetClassID(&clsid);
+		}
 		if (clsid == CLSID_DriveLocomotion) {
 			NavQueue.Add_Head(target);
 			RouteQueue.Clear();
@@ -5345,10 +5353,12 @@ void UnitClass::Assign_Destination(AbstractClass * target, bool immediate)
 		 * surface the tunneler by swapping the tunnel locomotor for a drive one.
 		 * (Mirrors BuildingClass weapons-factory exit, building.cpp:6236-6251.)
 		 */
-		if (target != NULL && !Locomotion->Is_Moving()) {
+		if (target != NULL && Locomotion != NULL && !Locomotion->Is_Moving()) {
+			CLSID clsid = CLSID_NULL;
 			IPersistPtr persist(Locomotion);
-			CLSID clsid;
-			persist->GetClassID(&clsid);
+			if (persist != NULL) {
+				persist->GetClassID(&clsid);
+			}
 			if (clsid == CLSID_TunnelLocomotion && Get_Height_AGL() == 0) {
 				Coord tc = target->Center_Coord();
 				int gl = Map.Get_Height_GL(tc);

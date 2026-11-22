@@ -326,7 +326,9 @@ BuildingClass::~BuildingClass(void)
 	Limbo();
 	Buildings.Delete(this);
 	End_Anim(BANIM_ALL);
-	Class->Free_Buildup_Data();
+	if (Class != NULL) {
+		Class->Free_Buildup_Data();
+	}
 
 	if (GameActive && Class != NULL && Class->IsCloakGenerator) {
 		Disable_Cloak_Generator();
@@ -334,7 +336,9 @@ BuildingClass::~BuildingClass(void)
 		Cloaking_AI(true);
 	}
 
-	House->Update_Present_Super_Weapons();
+	if (House != NULL) {
+		House->Update_Present_Super_Weapons();
+	}
 
 	if (GameActive) {
 		if (Strength != LastStrength) {
@@ -3335,15 +3339,15 @@ bool BuildingClass::Limbo(void)
 
 	if (!IsInLimbo) {
 
-		if (Class->IsLaserFencePost) {
+		if (Class != NULL && Class->IsLaserFencePost) {
 			Update_Laser_Fence_Connections(false);
 		}
 
 		if (!ScenarioInit) {
-			if (Class->IsSensorArray) {
+			if (Class != NULL && Class->IsSensorArray) {
 				Disable_Sensor_Array();
 			}
-			if (!Considered_Vehicle()) {
+			if (Class != NULL && !Considered_Vehicle()) {
 				Release_Base_Area();
 			}
 		}
@@ -3364,7 +3368,7 @@ bool BuildingClass::Limbo(void)
 			 * A wall tower that is removed from the map will cause the wall
 			 * segments next to it to recalculate their connection state.
 			 */
-			if (Class == Rule->WallTower) {
+			if (Class != NULL && Class == Rule->WallTower) {
 				for (i = 0; i < FACING_COUNT; i += FACING_COUNT / 4) {
 					Cell c = Adjacent_Cell(cell, (FacingType)i);
 					CellClass * cptr = &Map[c];
@@ -3378,17 +3382,17 @@ bool BuildingClass::Limbo(void)
 			/*
 			 * Gates update the wall segments that they were connected to.
 			 */
-			if (Class == Rule->GDIGateOne || Class == Rule->NodGateOne) {
+			if (Class != NULL && (Class == Rule->GDIGateOne || Class == Rule->NodGateOne)) {
 				Map[Cell(cell - Cell(1, 0))].Wall_Update(false);
 				Map[Cell(cell + Cell(3, 0))].Wall_Update(false);
 			}
 
-			if (Class == Rule->GDIGateTwo || Class == Rule->NodGateTwo) {
+			if (Class != NULL && (Class == Rule->GDIGateTwo || Class == Rule->NodGateTwo)) {
 				Map[Cell(cell - Cell(0, 1))].Wall_Update(false);
 				Map[Cell(cell + Cell(0, 3))].Wall_Update(false);
 			}
 
-			if (Class->ToTile == NULL) {
+			if (Class != NULL && Class->ToTile == NULL) {
 				int w = Class->Width();
 				int h = Class->Height();
 				Cell position = PositionCell;
@@ -5533,9 +5537,13 @@ int BuildingClass::Do_MISSION_REPAIR(void)
 					**	distance check.  Fixed-wing aircraft are very inaccurate with
 					**	their landings.
 					*/
-					IPersistPtr persist(tech->Locomotion);
-					CLSID clsid;
-					persist->GetClassID(&clsid);
+					CLSID clsid = CLSID_NULL;
+					if (tech != NULL && tech->Locomotion != NULL) {
+						IPersistPtr persist(tech->Locomotion);
+						if (persist != NULL) {
+							persist->GetClassID(&clsid);
+						}
+					}
 					bool hover = (clsid == CLSID_HoverLocomotion) != 0;
 					if (hover) {
 						distance = 0x96;
@@ -5544,7 +5552,7 @@ int BuildingClass::Do_MISSION_REPAIR(void)
 						Status = IDLE;
 						return(TICKS_PER_SECOND/4);
 					}
-					if (!IonStormClass::Is_Ion_Storm_Active()) {
+					if (!IonStormClass::Is_Ion_Storm_Active() && tech != NULL && tech->Locomotion != NULL) {
 						tech->Locomotion->Power_On();
 					}
 					break;
@@ -6220,10 +6228,13 @@ int BuildingClass::Do_MISSION_UNLOAD(void)
 			**	Start the door opening.
 			*/
 			case INITIAL:
-				unit = (UnitClass *)Contact_With_Whom();
-				if (unit) {
-					unit->Assign_Mission(MISSION_GUARD);
-					unit->Commence();
+				{
+					TechnoClass * contact = Contact_With_Whom();
+					if (contact != NULL && contact->Fetch_RTTI() == RTTI_UNIT && contact->IsActive && !contact->IsInLimbo) {
+						unit = (UnitClass *)contact;
+						unit->Assign_Mission(MISSION_GUARD);
+						unit->Commence();
+					}
 				}
 				Door.Open_Door(Class->DeployTime);
 				Status = CLEAR_BIB;
@@ -6249,13 +6260,18 @@ int BuildingClass::Do_MISSION_UNLOAD(void)
 			*/
 			case OPEN:
 				if (Door.Is_Door_Open()) {
-					unit = (UnitClass *)Contact_With_Whom();
-					if (unit) {
+					TechnoClass * contact = Contact_With_Whom();
+					if (contact != NULL && contact->Fetch_RTTI() == RTTI_UNIT && contact->IsActive && !contact->IsInLimbo) {
+						unit = (UnitClass *)contact;
 						unit->Assign_Mission(MISSION_MOVE);
 
-						IPersistPtr persist(unit->Locomotion);
-						CLSID clsid;
-						persist->GetClassID(&clsid);
+						CLSID clsid = CLSID_NULL;
+						if (unit->Locomotion != NULL) {
+							IPersistPtr persist(unit->Locomotion);
+							if (persist != NULL) {
+								persist->GetClassID(&clsid);
+							}
+						}
 
 						if (clsid == CLSID_TunnelLocomotion) {
 							IPiggybackPtr piggy(unit->Locomotion);
@@ -6263,24 +6279,29 @@ int BuildingClass::Do_MISSION_UNLOAD(void)
 								piggy->End_Piggyback(&unit->Locomotion);
 							}
 							ILocomotionPtr walk(CLSID_DriveLocomotion);
-							walk->Link_To_Object(unit);
-							piggy = IPiggybackPtr(walk);
-							if (piggy != NULL) {
-								piggy->Begin_Piggyback(unit->Locomotion);
-								unit->Locomotion = walk;
-								unit->Locomotion->Force_Track(DriveLocomotionClass::OUT_OF_WEAPON_FACTORY, coord);
+							if (walk != NULL) {
+								walk->Link_To_Object(unit);
+								piggy = IPiggybackPtr(walk);
+								if (piggy != NULL) {
+									piggy->Begin_Piggyback(unit->Locomotion);
+									unit->Locomotion = walk;
+									unit->Locomotion->Force_Track(DriveLocomotionClass::OUT_OF_WEAPON_FACTORY, coord);
+								} else {
+									int damage = unit->Strength;
+									unit->Take_Damage(damage, 0, Rule->C4Warhead, NULL, true);
+								}
 							} else {
 								int damage = unit->Strength;
 								unit->Take_Damage(damage, 0, Rule->C4Warhead, NULL, true);
 							}
-						} else if (clsid != CLSID_DriveLocomotion) {
-							unit->Assign_Destination(&Map[Get_Cell() + Cell(3, 1)]);
-						} else {
+						} else if (clsid == CLSID_DriveLocomotion && unit->Locomotion != NULL) {
 							Coord cs;
 							cs.X = coord.X;
 							cs.Y = coord.Y;
 							cs.Z = 0;
 							unit->Locomotion->Force_Track(DriveLocomotionClass::OUT_OF_WEAPON_FACTORY, cs);
+						} else {
+							unit->Assign_Destination(&Map[Get_Cell() + Cell(3, 1)]);
 						}
 						unit->Set_Speed(0.5);
 						Status = LEAVE;

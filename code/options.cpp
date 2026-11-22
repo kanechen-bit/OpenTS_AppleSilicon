@@ -134,7 +134,7 @@ OptionsClass::OptionsClass(void) :
 	Fullscreen(true),
 	WindowWidth(-1),
 	WindowHeight(-1),
-	ScaleMode(VIDEO_SCALE_PIXELART),
+	ScaleMode(VIDEO_SCALE_ARTCNN),
 	Sharpness(0.5f),
 	IntegerScaling(false),
 	VSync(false),
@@ -315,6 +315,7 @@ static int Scale_Mode_From_Name(char const * name, int fallback)
 	if (stricmp(name, "Linear") == 0) return(VIDEO_SCALE_LINEAR);
 	if (stricmp(name, "PixelArt") == 0) return(VIDEO_SCALE_PIXELART);
 	if (stricmp(name, "SuperSample") == 0) return(VIDEO_SCALE_SUPERSAMPLE);
+	if (stricmp(name, "ArtCNN") == 0) return(VIDEO_SCALE_ARTCNN);
 
 	return(fallback);
 }
@@ -334,11 +335,15 @@ static char const * Scale_Mode_Name(int mode)
 		case VIDEO_SCALE_LINEAR:
 			return("Linear");
 
+		case VIDEO_SCALE_PIXELART:
+			return("PixelArt");
+
 		case VIDEO_SCALE_SUPERSAMPLE:
 			return("SuperSample");
 
+		case VIDEO_SCALE_ARTCNN:
 		default:
-			return("PixelArt");
+			return("ArtCNN");
 	}
 }
 

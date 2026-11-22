@@ -125,6 +125,7 @@ inline BOOL PeekMessage(MSG *lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilt
 	**	stay responsive, including the menu engine's own delay loop.
 	*/
 	opents_window_pump();
+	opents_timer_pump();
 	OpentsMsg m;
 	bool const have = opents_msg_peek(&m);
 

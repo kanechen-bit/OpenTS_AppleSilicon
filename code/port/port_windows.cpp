@@ -249,6 +249,31 @@ char const *const kAtomNames[6] = {
 	"Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox",
 };
 
+std::string Canonical_System_Class_Name(char const *name)
+{
+	if (name == nullptr) {
+		return "";
+	}
+	static char const *const kSystemClasses[] = {
+		"Button",
+		"Edit",
+		"Static",
+		"ListBox",
+		"ScrollBar",
+		"ComboBox",
+		"msctls_trackbar32",
+		"msctls_progress32",
+		"SysTabControl32",
+		"msctls_hotkey32",
+	};
+	for (char const *canonical : kSystemClasses) {
+		if (strcasecmp(name, canonical) == 0) {
+			return canonical;
+		}
+	}
+	return name;
+}
+
 typedef intptr_t (*WinProc)(void *hwnd, unsigned message, uintptr_t wparam, intptr_t lparam);
 
 /* ------------------------------------------------------------------ */
@@ -1030,7 +1055,8 @@ extern "C" OpentsWin opents_win_create(char const *class_name, char const *text,
                                        void const *creation_data, unsigned creation_size)
 {
 	Win * w = new Win;
-	w->cls = class_name ? class_name : "";
+	// Win32 class matching is case-insensitive and GetClassName returns the canonical spelling.
+	w->cls = Canonical_System_Class_Name(class_name);
 	w->text = text ? text : "";
 	w->style = style;
 	w->ex_style = ex_style;

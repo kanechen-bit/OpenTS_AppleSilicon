@@ -27,6 +27,7 @@
 // by tools/make_fs_sharpen_bin.py from code/fs_sharpen.metal; see that script for
 // the container layout.
 #include "fs_sharpen.bin.h"
+#include "cs_artcnn.bin.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -45,16 +46,15 @@ static const bgfx::EmbeddedShader _EmbeddedShaders[] = {
 };
 
 
-// The view that magnifies the frame when the pixel art filter needs an intermediate
-// target, and the one that draws onto the window. Views render in ascending order, so
-// the magnify pass must carry the lower id for the present pass to sample its output
-// from this frame rather than the last one.
-static const bgfx::ViewId VIEW_PRESCALE = 0;
-static const bgfx::ViewId VIEW_PRESENT = 1;
+// Views execute in ascending order so ArtCNN compute and any prescale target complete
+// before VIEW_PRESENT samples them.
+static const bgfx::ViewId VIEW_ARTCNN = 0;
+static const bgfx::ViewId VIEW_PRESCALE = 1;
+static const bgfx::ViewId VIEW_PRESENT = 2;
 // The verification dump renders the finished frame into an offscreen target one view
 // later, copies it into a read-back texture in the next, and pulls it to the CPU.
-static const bgfx::ViewId VIEW_DUMP = 2;
-static const bgfx::ViewId VIEW_READBACK = 3;
+static const bgfx::ViewId VIEW_DUMP = 3;
+static const bgfx::ViewId VIEW_READBACK = 4;
 
 
 static bool _Initialized = false;
@@ -71,6 +71,27 @@ static bgfx::VertexLayout _VertexLayout;
 static bgfx::ProgramHandle _SharpenProgram = BGFX_INVALID_HANDLE;
 static bgfx::UniformHandle _SharpnessUniform = BGFX_INVALID_HANDLE;
 static float _Sharpness = 0.0f;
+
+// ArtCNN C4F16 2x compute upscaler (Metal only). All nine passes run sequentially on
+// VIEW_ARTCNN; if compute or target creation fails, present falls back to SuperSample.
+enum {
+	ARTCNN_PASS_COUNT = 9,
+};
+
+static bgfx::ProgramHandle _ArtCnnPrograms[ARTCNN_PASS_COUNT] = {
+	BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+	BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+	BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE, BGFX_INVALID_HANDLE,
+};
+static bool _ArtCnnReady = false;
+static bgfx::TextureHandle _ArtCnnLuma = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _ArtCnnConv0 = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _ArtCnnPing = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _ArtCnnPong = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _ArtCnnConv6 = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _ArtCnnOut = BGFX_INVALID_HANDLE;
+static int _ArtCnnWidth = 0;
+static int _ArtCnnHeight = 0;
 
 static int _FrameWidth = 0;
 static int _FrameHeight = 0;
@@ -315,6 +336,181 @@ static bool Ensure_Prescale_Target(int width, int height)
 }
 
 
+static void Destroy_ArtCnn_Programs(void)
+{
+	for (int i = 0; i < ARTCNN_PASS_COUNT; i++) {
+		if (bgfx::isValid(_ArtCnnPrograms[i])) {
+			bgfx::destroy(_ArtCnnPrograms[i]);
+			_ArtCnnPrograms[i] = BGFX_INVALID_HANDLE;
+		}
+	}
+	_ArtCnnReady = false;
+}
+
+
+static void Destroy_ArtCnn_Targets(void)
+{
+	bgfx::TextureHandle * const targets[] = {
+		&_ArtCnnLuma, &_ArtCnnConv0, &_ArtCnnPing,
+		&_ArtCnnPong, &_ArtCnnConv6, &_ArtCnnOut,
+	};
+	for (bgfx::TextureHandle * target : targets) {
+		if (bgfx::isValid(*target)) {
+			bgfx::destroy(*target);
+			*target = BGFX_INVALID_HANDLE;
+		}
+	}
+	_ArtCnnWidth = 0;
+	_ArtCnnHeight = 0;
+}
+
+
+static bool Ensure_ArtCnn_Targets(int width, int height)
+{
+	if (_ArtCnnWidth == width && _ArtCnnHeight == height && bgfx::isValid(_ArtCnnOut)) {
+		return(true);
+	}
+
+	Destroy_ArtCnn_Targets();
+
+	const bgfx::Caps * caps = bgfx::getCaps();
+	if (width <= 0 || height <= 0
+		|| width * 2 > (int)caps->limits.maxTextureSize
+		|| height * 2 > (int)caps->limits.maxTextureSize) {
+		return(false);
+	}
+
+	const uint32_t rw = BGFX_CAPS_FORMAT_TEXTURE_IMAGE_READ | BGFX_CAPS_FORMAT_TEXTURE_IMAGE_WRITE;
+	if ((caps->formats[bgfx::TextureFormat::R16F] & rw) != rw
+		|| (caps->formats[bgfx::TextureFormat::RGBA16F] & rw) != rw
+		|| (caps->formats[bgfx::TextureFormat::RGBA8] & BGFX_CAPS_FORMAT_TEXTURE_IMAGE_WRITE) == 0) {
+		return(false);
+	}
+
+	const int w2 = width * 2;
+	const int h2 = height * 2;
+	const uint64_t clampflags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+
+	struct TargetSpec {
+		bgfx::TextureHandle * handle;
+		int width;
+		int height;
+		bgfx::TextureFormat::Enum format;
+		uint64_t flags;
+	};
+	const TargetSpec specs[] = {
+		{ &_ArtCnnLuma,  width, height, bgfx::TextureFormat::R16F,    BGFX_TEXTURE_COMPUTE_WRITE },
+		{ &_ArtCnnConv0, w2,    h2,     bgfx::TextureFormat::RGBA16F, BGFX_TEXTURE_COMPUTE_WRITE },
+		{ &_ArtCnnPing,  w2,    h2,     bgfx::TextureFormat::RGBA16F, BGFX_TEXTURE_COMPUTE_WRITE },
+		{ &_ArtCnnPong,  w2,    h2,     bgfx::TextureFormat::RGBA16F, BGFX_TEXTURE_COMPUTE_WRITE },
+		{ &_ArtCnnConv6, width, height, bgfx::TextureFormat::RGBA16F, BGFX_TEXTURE_COMPUTE_WRITE },
+		{ &_ArtCnnOut,   w2,    h2,     bgfx::TextureFormat::RGBA8,   BGFX_TEXTURE_COMPUTE_WRITE | clampflags },
+	};
+
+	for (TargetSpec const & spec : specs) {
+		*spec.handle = bgfx::createTexture2D((uint16_t)spec.width, (uint16_t)spec.height, false, 1, spec.format, spec.flags);
+		if (!bgfx::isValid(*spec.handle)) {
+			Destroy_ArtCnn_Targets();
+			return(false);
+		}
+	}
+
+	_ArtCnnWidth = width;
+	_ArtCnnHeight = height;
+	return(true);
+}
+
+
+static void Init_ArtCnn_Programs(void)
+{
+	Destroy_ArtCnn_Programs();
+
+	struct ShaderSpec {
+		char const * name;
+		uint8_t const * data;
+		uint32_t size;
+	};
+	const ShaderSpec specs[ARTCNN_PASS_COUNT] = {
+		{ "cs_artcnn_rgb_to_luma",  cs_artcnn_rgb_to_luma_mtl,  (uint32_t)sizeof(cs_artcnn_rgb_to_luma_mtl) },
+		{ "cs_artcnn_conv0",        cs_artcnn_conv0_mtl,        (uint32_t)sizeof(cs_artcnn_conv0_mtl) },
+		{ "cs_artcnn_conv1",        cs_artcnn_conv1_mtl,        (uint32_t)sizeof(cs_artcnn_conv1_mtl) },
+		{ "cs_artcnn_conv2",        cs_artcnn_conv2_mtl,        (uint32_t)sizeof(cs_artcnn_conv2_mtl) },
+		{ "cs_artcnn_conv3",        cs_artcnn_conv3_mtl,        (uint32_t)sizeof(cs_artcnn_conv3_mtl) },
+		{ "cs_artcnn_conv4",        cs_artcnn_conv4_mtl,        (uint32_t)sizeof(cs_artcnn_conv4_mtl) },
+		{ "cs_artcnn_conv5",        cs_artcnn_conv5_mtl,        (uint32_t)sizeof(cs_artcnn_conv5_mtl) },
+		{ "cs_artcnn_conv6",        cs_artcnn_conv6_mtl,        (uint32_t)sizeof(cs_artcnn_conv6_mtl) },
+		{ "cs_artcnn_d2s_recombine", cs_artcnn_d2s_recombine_mtl, (uint32_t)sizeof(cs_artcnn_d2s_recombine_mtl) },
+	};
+
+	for (int i = 0; i < ARTCNN_PASS_COUNT; i++) {
+		bgfx::ShaderHandle csh = bgfx::createShader(bgfx::makeRef(specs[i].data, specs[i].size));
+		if (!bgfx::isValid(csh)) {
+			Destroy_ArtCnn_Programs();
+			return;
+		}
+		bgfx::setName(csh, specs[i].name);
+		_ArtCnnPrograms[i] = bgfx::createProgram(csh, true);
+		if (!bgfx::isValid(_ArtCnnPrograms[i])) {
+			Destroy_ArtCnn_Programs();
+			return;
+		}
+	}
+
+	_ArtCnnReady = true;
+}
+
+
+static bool Run_ArtCnn_Pass(int width, int height)
+{
+	if (!_ArtCnnReady || !Ensure_ArtCnn_Targets(width, height)) {
+		return(false);
+	}
+
+	const uint32_t gx1 = (uint32_t)((width + 15) / 16);
+	const uint32_t gy1 = (uint32_t)((height + 15) / 16);
+	const uint32_t gx2 = (uint32_t)((width * 2 + 15) / 16);
+	const uint32_t gy2 = (uint32_t)((height * 2 + 15) / 16);
+	const unsigned int clampflags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+
+	bgfx::setViewMode(VIEW_ARTCNN, bgfx::ViewMode::Sequential);
+
+	bgfx::setTexture(0, _TextureSampler, _FrameTexture, clampflags);
+	bgfx::setImage(1, _ArtCnnLuma, 0, bgfx::Access::Write);
+	bgfx::dispatch(VIEW_ARTCNN, _ArtCnnPrograms[0], gx1, gy1, 1);
+
+	struct PingPongStep {
+		int program;
+		bgfx::TextureHandle input;
+		bgfx::TextureHandle output;
+	};
+	const PingPongStep steps[] = {
+		{ 1, _ArtCnnLuma,  _ArtCnnConv0 },
+		{ 2, _ArtCnnConv0, _ArtCnnPing },
+		{ 3, _ArtCnnPing,  _ArtCnnPong },
+		{ 4, _ArtCnnPong,  _ArtCnnPing },
+		{ 5, _ArtCnnPing,  _ArtCnnPong },
+		{ 6, _ArtCnnPong,  _ArtCnnPing },
+	};
+	for (PingPongStep const & step : steps) {
+		bgfx::setImage(0, step.input, 0, bgfx::Access::Read);
+		bgfx::setImage(1, step.output, 0, bgfx::Access::Write);
+		bgfx::dispatch(VIEW_ARTCNN, _ArtCnnPrograms[step.program], gx1, gy1, 1);
+	}
+
+	bgfx::setImage(0, _ArtCnnPing, 0, bgfx::Access::Read);
+	bgfx::setImage(1, _ArtCnnConv0, 0, bgfx::Access::Read);
+	bgfx::setImage(2, _ArtCnnConv6, 0, bgfx::Access::Write);
+	bgfx::dispatch(VIEW_ARTCNN, _ArtCnnPrograms[7], gx1, gy1, 1);
+
+	bgfx::setImage(0, _ArtCnnConv6, 0, bgfx::Access::Read);
+	bgfx::setTexture(1, _TextureSampler, _FrameTexture, clampflags);
+	bgfx::setImage(2, _ArtCnnOut, 0, bgfx::Access::Write);
+	bgfx::dispatch(VIEW_ARTCNN, _ArtCnnPrograms[8], gx2, gy2, 1);
+
+	return(true);
+}
+
+
 /// <summary>
 /// Starts the renderer on an existing window.
 /// </summary>
@@ -424,6 +620,9 @@ bool Backend_Init(NativeWindow const & window, int drawablewidth, int drawablehe
 			}
 		}
 		_SharpnessUniform = bgfx::createUniform("u_sharpness", bgfx::UniformType::Vec4);
+		if ((bgfx::getCaps()->supported & BGFX_CAPS_COMPUTE) != 0) {
+			Init_ArtCnn_Programs();
+		}
 	}
 
 	_Initialized = true;
@@ -441,6 +640,7 @@ void Backend_Shutdown(void)
 	}
 
 	Destroy_Prescale_Target();
+	Destroy_ArtCnn_Targets();
 
 	if (bgfx::isValid(_DumpReadBack)) {
 		bgfx::destroy(_DumpReadBack);
@@ -472,6 +672,7 @@ void Backend_Shutdown(void)
 		bgfx::destroy(_SharpenProgram);
 		_SharpenProgram = BGFX_INVALID_HANDLE;
 	}
+	Destroy_ArtCnn_Programs();
 	if (bgfx::isValid(_SharpnessUniform)) {
 		bgfx::destroy(_SharpnessUniform);
 		_SharpnessUniform = BGFX_INVALID_HANDLE;
@@ -590,16 +791,25 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 	bgfx::TextureHandle source = _FrameTexture;
 	unsigned int samplerflags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
 	bool from_prescale = false;
+	BackendScaleMode activemode = mode;
 
-	if (mode == BACKEND_SCALE_NEAREST) {
+	if (activemode == BACKEND_SCALE_NEAREST) {
 		samplerflags |= BGFX_SAMPLER_POINT;
+	}
+
+	if (activemode == BACKEND_SCALE_ARTCNN && destwidth > _FrameWidth && destheight > _FrameHeight) {
+		if (Run_ArtCnn_Pass(_FrameWidth, _FrameHeight)) {
+			source = _ArtCnnOut;
+		} else {
+			activemode = BACKEND_SCALE_SUPERSAMPLE;
+		}
 	}
 
 	// The pixel art filter keeps whole pixels whole. An exact multiple needs nothing but
 	// point sampling; anything else is magnified to the next whole multiple with point
 	// sampling and then shrunk to the window smoothly, which keeps edges sharp without
 	// the uneven pixel sizes that point sampling alone would give.
-	if (mode == BACKEND_SCALE_PIXELART && destwidth > _FrameWidth && destheight > _FrameHeight) {
+	if (activemode == BACKEND_SCALE_PIXELART && destwidth > _FrameWidth && destheight > _FrameHeight) {
 		if ((destwidth % _FrameWidth) == 0 && (destheight % _FrameHeight) == 0) {
 			samplerflags |= BGFX_SAMPLER_POINT;
 		} else {
@@ -627,7 +837,7 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 	// edge takes on the average of the two colours it straddles, while the inside of a
 	// run of identical texels comes back unchanged. Two-times anti-aliasing that costs
 	// one extra pass and needs no shader of its own.
-	if (mode == BACKEND_SCALE_SUPERSAMPLE && destwidth > _FrameWidth && destheight > _FrameHeight) {
+	if (activemode == BACKEND_SCALE_SUPERSAMPLE && destwidth > _FrameWidth && destheight > _FrameHeight) {
 		int scale = (destwidth + _FrameWidth - 1) / _FrameWidth;
 		int scaley = (destheight + _FrameHeight - 1) / _FrameHeight;
 		if (scaley > scale) {
@@ -656,7 +866,7 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 	// and the verification dump below then shows whatever the window would show.
 	bgfx::ProgramHandle presentprogram = _Program;
 	float presentsharpness = 0.0f;
-	if (mode == BACKEND_SCALE_SUPERSAMPLE && from_prescale && _Sharpness > 0.0f && bgfx::isValid(_SharpenProgram)) {
+	if (activemode == BACKEND_SCALE_SUPERSAMPLE && from_prescale && _Sharpness > 0.0f && bgfx::isValid(_SharpenProgram)) {
 		presentprogram = _SharpenProgram;
 		presentsharpness = _Sharpness;
 	}

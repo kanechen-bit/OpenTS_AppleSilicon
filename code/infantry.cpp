@@ -632,9 +632,13 @@ void InfantryClass::Draw_It(Point2D const & xpoint, Rect const & cliprect) const
 	Cell cell = Get_Target_Cell();
 
 	if (CurrentTube == -1) {
-		IPersistPtr persist = Locomotion;
-		CLSID clsid;
-		persist->GetClassID(&clsid);
+		CLSID clsid = CLSID_NULL;
+		if (Locomotion != NULL) {
+			IPersistPtr persist = Locomotion;
+			if (persist != NULL) {
+				persist->GetClassID(&clsid);
+			}
+		}
 
 		if (HeightAGL > 0 && clsid == CLSID_BallisticLocomotion) {
 			ShapeSet const * shapefile = (ShapeSet const *)MFCD::Retrieve("POD.SHP");
@@ -1173,10 +1177,12 @@ void InfantryClass::Assign_Destination(AbstractClass * target, bool immediate)
 		Path[0] = FACING_NONE;
 	}
 
-	if (target != NULL && Class->IsJumpJet && Locomotion->Is_Moving()) {
+	if (target != NULL && Class->IsJumpJet && Locomotion != NULL && Locomotion->Is_Moving()) {
+		CLSID clsid = CLSID_NULL;
 		IPersistPtr persist(Locomotion);
-		CLSID clsid;
-		persist->GetClassID(&clsid);
+		if (persist != NULL) {
+			persist->GetClassID(&clsid);
+		}
 		if (clsid == CLSID_WalkLocomotion) {
 			NavQueue.Add_Head(target);
 			target = Get_Target_Cell_Ptr();
@@ -2439,7 +2445,9 @@ bool InfantryClass::Start_Driver(Coord & headto)
  *=============================================================================================*/
 bool InfantryClass::Limbo(void)
 {
-	Locomotion->Stop_Movement_Animation();
+	if (Locomotion != NULL) {
+		Locomotion->Stop_Movement_Animation();
+	}
 	return(BASECLASS::Limbo());
 }
 
@@ -4197,10 +4205,15 @@ bool InfantryClass::Is_JumpJet(void) const
 		return(false);
 	}
 
-	IPersistPtr persist(Locomotion);
-	CLSID clsid;
-	persist->GetClassID(&clsid);
-	return((clsid == CLSID_JumpjetLocomotion) ? true : false);
+	if (Locomotion != NULL) {
+		IPersistPtr persist(Locomotion);
+		if (persist != NULL) {
+			CLSID clsid = CLSID_NULL;
+			persist->GetClassID(&clsid);
+			return(clsid == CLSID_JumpjetLocomotion);
+		}
+	}
+	return(false);
 }
 
 

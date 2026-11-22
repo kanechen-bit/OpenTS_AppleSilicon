@@ -27,6 +27,9 @@ void * opents_window_create(int x, int y, int w, int h, int popup);
 // Makes the window visible and brings it forward.
 void opents_window_show(void * hwnd);
 
+// Resizes (and when x==0 && y==0, re-centers) the Cocoa window's content area.
+void opents_window_set_rect(void * hwnd, int x, int y, int w, int h);
+
 // Physical-pixel size of the window's drawable (client) area.
 void opents_window_get_client_size(void * hwnd, int * width, int * height);
 

@@ -84,13 +84,6 @@ extern void Clamp_Tile_RGB(int & r, int & g, int & b);
 
 PaletteClass IsoTilePalette;
 
-// The iso tile image data stores the palette's magenta entry (255,0,255) to mark
-// pixels that must not be drawn, so the tile beneath shows through. The original
-// Draw_Tile skipped these transparent pixels; the ARM64 reimplementation drew them
-// opaquely, producing the purple speckle. This holds the detected transparent
-// palette index (default 135 for the temperate theater).
-static int IsoTileTransparentIndex = 0;
-
 DynamicVectorClass<IsometricTileTypeClass::TileInsertType *> IsometricTileTypeClass::TileInsertTypes;
 
 struct ShadowCasterInfo {
@@ -725,27 +718,6 @@ void IsometricTileTypeClass::Read_Control_File(TheaterType theater, bool from_cc
 			*color <<= 2;
 			color++;
 		}
-
-		/*
-		**	Find the transparent index in the iso palette. Iso tile image data marks
-		**	"don't draw" pixels with the palette's magenta entry (255,0,255); the original
-		**	Draw_Tile skipped them so the tile beneath showed through. The diagnostic
-		**	proved index 135 maps to magenta (0xF81F) in the live iso palette, so default
-		**	to 135 and only override when 135 itself is NOT magenta and a different
-		**	magenta entry exists (other theaters).
-		*/
-		IsoTileTransparentIndex = 135;
-		if (!(IsoTilePalette[135].Get_Red() >= 240 && IsoTilePalette[135].Get_Green() <= 12 && IsoTilePalette[135].Get_Blue() >= 240)) {
-			for (int p = 0; p < PaletteClass::COLOR_COUNT; p++) {
-				if (IsoTilePalette[p].Get_Red() >= 240 && IsoTilePalette[p].Get_Green() <= 12 && IsoTilePalette[p].Get_Blue() >= 240) {
-					IsoTileTransparentIndex = p;
-					break;
-				}
-			}
-		}
-		DebugString("ISO transparent index = %d (pal135 R,G,B = %d,%d,%d)\n",
-			IsoTileTransparentIndex,
-			IsoTilePalette[135].Get_Red(), IsoTilePalette[135].Get_Green(), IsoTilePalette[135].Get_Blue());
 	}
 	IsometricTileTypeClass::Init_Drawers();
 
@@ -1671,36 +1643,6 @@ char IsoSpanTablesBuilt;
 /// At most one of fill, depth_only and fog may be set on any one call. With none of them
 /// set, the tile is drawn normally.
 /// </remarks>
-
-/* Speckle root-cause histogram: counts source palette indices drawn by the iso blitter.
-   The genuine transparent index appears as a dominant 'drawn' count. Auto-runs and writes
-   /tmp/opents_iso_diag.txt once enough samples are collected, then stops. */
-static void Iso_Diag_Inc(unsigned char src, unsigned short out, int drawn)
-{
-	static int d_inited = 0;
-	static long d_read[256];
-	static long d_drawn[256];
-	static unsigned short d_ex[256];
-	static long d_total = 0;
-	static FILE * d_f = NULL;
-	if (!d_inited) {
-		d_inited = 1;
-		for (int i = 0; i < 256; ++i) { d_read[i] = 0; d_drawn[i] = 0; d_ex[i] = 0; }
-		d_f = fopen("/tmp/opents_iso_diag.txt", "w");
-	}
-	d_read[src]++;
-	if (drawn) { d_drawn[src]++; d_ex[src] = out; }
-	d_total++;
-	if (d_f && d_total >= 150000) {
-		for (int i = 0; i < 256; ++i) {
-			if (d_read[i] > 0)
-				fprintf(d_f, "src=%3d read=%8ld drawn=%8ld color=0x%04X\n", i, d_read[i], d_drawn[i], (unsigned)d_ex[i]);
-		}
-		fprintf(d_f, "=== TOTAL reads=%ld (transparent index = highest 'drawn' count) ===\n", d_total);
-		fclose(d_f); d_f = NULL;
-	}
-}
-
 void IsometricTileTypeClass::Draw_Tile(LightConvertClass * drawer, int subtile, Surface & surface, int x, int y, Rect cliprect, int height, int brightness, bool use_z, int cell_variation, bool fill, bool depth_only, bool fog, signed int fog_color) const
 {
 	static int const _iso_row_bases[ISO_HEIGHT] = {
@@ -2126,18 +2068,11 @@ void IsometricTileTypeClass::Draw_Tile(LightConvertClass * drawer, int subtile, 
 									int run = *IsoDrawData.RowRunLength;
 									if (run > 0) {
 										do {
-										{
-										unsigned char isotd_src = *(unsigned char *)IsoDrawData.SrcPixel;
-										unsigned short isotd_out = IsoDrawData.PixelTranslate[isotd_src | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
-										Iso_Diag_Inc(isotd_src, isotd_out, (isotd_src != IsoTileTransparentIndex) && ((isotd_out & 0xF7DE) != 0xF01E));
-										if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
-												unsigned short pixeldepth = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
-												if (*IsoDrawData.DepthPtr >= pixeldepth) {
-													*IsoDrawData.DepthPtr = pixeldepth;
-													*IsoDrawData.DestPtr = isotd_out;
-												}
+											unsigned short pixeldepth = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
+											if (*IsoDrawData.DepthPtr >= pixeldepth) {
+												*IsoDrawData.DepthPtr = pixeldepth;
+												*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 											}
-										}
 											++IsoDrawData.SrcDepth;
 											++IsoDrawData.DepthPtr;
 											++IsoDrawData.SrcPixel;
@@ -2285,14 +2220,8 @@ void IsometricTileTypeClass::Draw_Tile(LightConvertClass * drawer, int subtile, 
 											do {
 												unsigned short pixeldepth = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
 												if (*IsoDrawData.DepthPtr >= pixeldepth) {
-													{
-unsigned char isotd_src = *(unsigned char *)IsoDrawData.SrcPixel;
-unsigned short isotd_out = IsoDrawData.PixelTranslate[isotd_src | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]]; Iso_Diag_Inc(isotd_src, isotd_out, (isotd_src != IsoTileTransparentIndex) && ((isotd_out & 0xF7DE) != 0xF01E));
-if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
-															*IsoDrawData.DepthPtr = pixeldepth;
-															*IsoDrawData.DestPtr = isotd_out;
-														}
-													}
+													*IsoDrawData.DepthPtr = pixeldepth;
+													*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 												}
 												++IsoDrawData.SrcDepth;
 												++IsoDrawData.DepthPtr;
@@ -2328,13 +2257,7 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 									int run = *IsoDrawData.RowRunLength;
 									if (run > 0) {
 										do {
-											{
-												unsigned char isotd_src = *(unsigned char *)IsoDrawData.SrcPixel;
-												unsigned short isotd_out = IsoDrawData.PixelTranslate[isotd_src | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
-												if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
-													*IsoDrawData.DestPtr = isotd_out;
-												}
-											}
+											*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 											++IsoDrawData.DestPtr;
 											++IsoDrawData.SrcPixel;
 											++IsoDrawData.AlphaPtr;
@@ -2362,13 +2285,7 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 									int run = *IsoDrawData.RowRunLength;
 									if (run > 0) {
 										do {
-											{
-												unsigned char isotd_src = *(unsigned char *)IsoDrawData.SrcPixel;
-												unsigned short isotd_out = IsoDrawData.PixelTranslate[isotd_src | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
-												if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
-													*IsoDrawData.DestPtr = isotd_out;
-												}
-											}
+											*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 											++IsoDrawData.DestPtr;
 											++IsoDrawData.SrcPixel;
 											++IsoDrawData.AlphaPtr;
@@ -2451,12 +2368,10 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 										for (int row = 0; row < IsoDrawData.SpanHeight; ++row) {
 											for (int col = 0; col < (int)IsoDrawData.SpanWidth; ++col) {
 												if (*(unsigned char *)IsoDrawData.SrcPixel) {
-													if (*IsoDrawData.DepthPtr >= (unsigned short)((unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth)) {
-														unsigned short isotd_out = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]]; Iso_Diag_Inc(*(unsigned char*)IsoDrawData.SrcPixel, isotd_out, ((isotd_out & 0xF7DE) != 0xF01E));
-														if ((isotd_out & 0xF7DE) != 0xF01E) {
-															*IsoDrawData.DestPtr = isotd_out;
-															*IsoDrawData.DepthPtr = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
-														}
+													unsigned short pixeldepth = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
+													if (*IsoDrawData.DepthPtr >= pixeldepth) {
+														*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
+														*IsoDrawData.DepthPtr = pixeldepth;
 													}
 												}
 												++IsoDrawData.DestPtr;
@@ -2483,12 +2398,10 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 										for (int row = 0; row < IsoDrawData.SpanHeight; ++row) {
 											for (int col = 0; col < (int)IsoDrawData.SpanWidth; ++col) {
 												if (*(unsigned char *)IsoDrawData.SrcPixel) {
-													if (*IsoDrawData.DepthPtr >= (unsigned short)((unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth)) {
-														unsigned short isotd_out = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]]; Iso_Diag_Inc(*(unsigned char*)IsoDrawData.SrcPixel, isotd_out, ((isotd_out & 0xF7DE) != 0xF01E));
-														if ((isotd_out & 0xF7DE) != 0xF01E) {
-															*IsoDrawData.DestPtr = isotd_out;
-															*IsoDrawData.DepthPtr = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
-														}
+													unsigned short pixeldepth = (unsigned short)IsoDrawData.BaseDepth + *(unsigned char *)IsoDrawData.SrcDepth;
+													if (*IsoDrawData.DepthPtr >= pixeldepth) {
+														*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
+														*IsoDrawData.DepthPtr = pixeldepth;
 													}
 												}
 												++IsoDrawData.DestPtr;
@@ -2512,10 +2425,7 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 									for (int row = 0; row < IsoDrawData.SpanHeight; ++row) {
 										for (int col = 0; col < (int)IsoDrawData.SpanWidth; ++col) {
 											if (*(unsigned char *)IsoDrawData.SrcPixel) {
-												unsigned short isotd_out = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]]; Iso_Diag_Inc(*(unsigned char*)IsoDrawData.SrcPixel, isotd_out, ((isotd_out & 0xF7DE) != 0xF01E));
-												if ((isotd_out & 0xF7DE) != 0xF01E) {
-													*IsoDrawData.DestPtr = isotd_out;
-												}
+												*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 											}
 											++IsoDrawData.DestPtr;
 											++IsoDrawData.AlphaPtr;
@@ -2535,10 +2445,7 @@ if ((isotd_src != IsoTileTransparentIndex) && (isotd_out & 0xF7DE) != 0xF01E) {
 									for (int row = 0; row < IsoDrawData.SpanHeight; ++row) {
 										for (int col = 0; col < (int)IsoDrawData.SpanWidth; ++col) {
 											if (*(unsigned char *)IsoDrawData.SrcPixel) {
-												unsigned short isotd_out = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]]; Iso_Diag_Inc(*(unsigned char*)IsoDrawData.SrcPixel, isotd_out, ((isotd_out & 0xF7DE) != 0xF01E));
-												if ((isotd_out & 0xF7DE) != 0xF01E) {
-													*IsoDrawData.DestPtr = isotd_out;
-												}
+												*IsoDrawData.DestPtr = IsoDrawData.PixelTranslate[*(unsigned char *)IsoDrawData.SrcPixel | IsoDrawData.LightRemap[*IsoDrawData.AlphaPtr]];
 											}
 											++IsoDrawData.DestPtr;
 											++IsoDrawData.SrcPixel;

@@ -941,6 +941,15 @@ bool LoadOptionsClass::Read_File(FileEntryClass * fdata, WIN32_FIND_DATAA * ff)
 	}
 
 	wsprintf(fdata->Descr, "%s", savever.Get_Scenario_Description());
+	if (fdata->Descr[0] == '\0' && ff->cFileName[0] != '\0') {
+		// Pre-fallback autosaves stored an empty description; surface the filename stem instead of a blank row.
+		strncpy(fdata->Descr, ff->cFileName, sizeof(fdata->Descr) - 1);
+		fdata->Descr[sizeof(fdata->Descr) - 1] = '\0';
+		char * dot = strrchr(fdata->Descr, '.');
+		if (dot != NULL && dot != fdata->Descr) {
+			*dot = '\0';
+		}
+	}
 
 	fdata->Valid = ok;
 	fdata->Scenario = savever.Get_Scenario_Number();

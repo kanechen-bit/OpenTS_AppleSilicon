@@ -3661,7 +3661,7 @@ LRESULT CALLBACK ListBoxCtrlProc(HWND window, UINT message, WPARAM wparam, LPARA
 	 * Keep the attached scrollbar synchronized with the listbox state. This is skipped for
 	 * the few messages that are queried while computing the scroll state (to avoid recursion).
 	 */
-	if (message != LB_GETCOUNT && message != LB_GETITEMHEIGHT && message != WM_VSCROLL) {
+	if (message != LB_GETCOUNT && message != LB_GETITEMHEIGHT && message != WM_VSCROLL && message != LB_SETTOPINDEX) {
 		int count = SendMessage(window, LB_GETCOUNT, 0, 0);
 		int item_height = SendMessage(window, LB_GETITEMHEIGHT, 0, 0);
 		if (item_height <= 1) {
@@ -4100,6 +4100,15 @@ LRESULT CALLBACK ListBoxCtrlProc(HWND window, UINT message, WPARAM wparam, LPARA
 			}
 			if (index != data->ListBox.topIndex) {
 				data->ListBox.topIndex = index;
+				if ((uintptr_t)data->attachedWindow > 1) {
+					SCROLLINFO info;
+					info.fMask = SIF_RANGE | SIF_POS;
+					info.nMin = 0;
+					info.nMax = (count > visible) ? (count - visible) : 0;
+					info.nPos = data->ListBox.topIndex;
+					info.cbSize = sizeof(SCROLLINFO);
+					SendMessage(data->attachedWindow, SBM_SETSCROLLINFO, 0, (LPARAM)&info);
+				}
 				InvalidateRect(window, NULL, FALSE);
 			}
 			return(0);
@@ -4262,6 +4271,78 @@ LRESULT CALLBACK ListBoxCtrlProc(HWND window, UINT message, WPARAM wparam, LPARA
 			SendMessage(parent, WM_COMMAND, (GetWindowLong(window, GWL_ID) & 0xFFFF) | 0x10000, (LPARAM)window);
 			InvalidateRect(window, NULL, FALSE);
 			return(0);
+
+		case WM_MOUSEWHEEL: {
+			static HWND wheel_window = NULL;
+			static int wheel_accum = 0;
+			if (wheel_window != window) {
+				wheel_window = window;
+				wheel_accum = 0;
+			}
+			wheel_accum += (int)(short)HIWORD(wparam);
+			const int step_delta = 40;
+			int lines = wheel_accum / step_delta;
+			if (lines != 0) {
+				wheel_accum -= lines * step_delta;
+				int top = (int)SendMessage(window, LB_GETTOPINDEX, 0, 0);
+				SendMessage(window, LB_SETTOPINDEX, (WPARAM)(top - lines), 0);
+			}
+			return(0);
+		}
+
+		case WM_KEYDOWN: {
+			LONG style = GetWindowLong(window, GWL_STYLE);
+			if ((style & (LBS_MULTIPLESEL | LBS_NOSEL)) != 0) {
+				break;
+			}
+			int count = (int)SendMessage(window, LB_GETCOUNT, 0, 0);
+			if (count <= 0) {
+				break;
+			}
+			int item_height = (int)SendMessage(window, LB_GETITEMHEIGHT, 0, 0);
+			if (item_height < 1) {
+				item_height = 1;
+			}
+			int visible = (client_rect.bottom - client_rect.top) / item_height;
+			if (visible < 1) {
+				visible = 1;
+			}
+			int cur = data->ListBox.curSel;
+			int next = cur;
+			switch (wparam) {
+				case VK_UP:
+					next = (cur > 0) ? (cur - 1) : 0;
+					break;
+				case VK_DOWN:
+					next = (cur < 0) ? 0 : ((cur + 1 < count) ? (cur + 1) : (count - 1));
+					break;
+				case VK_PRIOR:
+					next = (cur > visible) ? (cur - visible) : 0;
+					break;
+				case VK_NEXT:
+					next = (cur < 0) ? 0 : ((cur + visible < count) ? (cur + visible) : (count - 1));
+					break;
+				case VK_HOME:
+					next = 0;
+					break;
+				case VK_END:
+					next = count - 1;
+					break;
+				default:
+					next = -2;
+					break;
+			}
+			if (next == -2) {
+				break;
+			}
+			SendMessage(window, LB_SETCURSEL, (WPARAM)next, 0);
+			if (next < data->ListBox.topIndex) {
+				SendMessage(window, LB_SETTOPINDEX, (WPARAM)next, 0);
+			} else if (next >= data->ListBox.topIndex + visible) {
+				SendMessage(window, LB_SETTOPINDEX, (WPARAM)(next - visible + 1), 0);
+			}
+			return(0);
+		}
 
 		case OD_GETCELLTIP: {
 			int count = SendMessage(window, LB_GETCOUNT, 0, 0);
@@ -4874,6 +4955,12 @@ LRESULT CALLBACK ScrollBarCtrlProc(HWND window, UINT message, WPARAM wparam, LPA
 				}
 			}
 			break;
+
+		case WM_MOUSEWHEEL:
+			if (data != NULL && data->ownerWindow != NULL) {
+				return(SendMessage(data->ownerWindow, message, wparam, lparam));
+			}
+			return(0);
 	}
 
 	int send_notify = 0;

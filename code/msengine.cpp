@@ -404,24 +404,10 @@ void MSEngine::Wait_For_Focus(void)
 			Anims[index]->Pause();
 		}
 
-		int waited = 0;
 		while (!GameInFocus) {
 			DebugString("MSEngine - Sleeping\n");
 			Sleep(500);
 			Windows_Message_Handler();
-
-			// Temporary port diagnostic + anti-deadlock: when launched from a
-			// terminal, macOS may never activate the app, so no WM_ACTIVATEAPP(1)
-			// is ever raised and this loop spins forever (silent freeze on the
-			// title screen). After ~4s assume we have focus so the game can
-			// proceed. Real focus changes still work via the WM_ACTIVATEAPP path;
-			// this only fires if that path never delivers.
-			if (++waited >= 8) {
-				fprintf(stderr, "[FIXME] Wait_For_Focus: no WM_ACTIVATEAPP after ~4s; assuming focus (GameInFocus was %d)\n", (int)GameInFocus);
-				fflush(stderr);
-				GameInFocus = true;
-				break;
-			}
 		}
 
 		DebugString("MSEngine - Resuming animations\n");

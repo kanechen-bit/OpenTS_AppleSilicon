@@ -13,6 +13,7 @@
 
 #include <cassert>
 #include <climits>
+#include <cstdint>
 
 
 #define PARENT(index) (index >> 1)
@@ -268,17 +269,27 @@ void PriorityQueueClass<T>::Serialize(S & stream, T * nodes)
 	}
 
 	for (int slot = 0; slot < Size; slot++) {
-		int index = stream.Is_Saving() ? (int)(Heap[slot] - nodes) : 0;
+		int index = -1;
+		if (stream.Is_Saving() && Heap[slot] != NULL) {
+			index = (int)(Heap[slot] - nodes);
+		}
 		stream.Serialize(index);
 
 		if (stream.Is_Loading()) {
-			Heap[slot] = &nodes[index];
+			if (index < 0) {
+				Heap[slot] = NULL;
+			} else if (index >= Size) {
+				stream.Fail();
+				return;
+			} else {
+				Heap[slot] = &nodes[index];
 
-			if ((unsigned)Heap[slot] > MaxNodePointer) {
-				MaxNodePointer = (unsigned)Heap[slot];
-			}
-			if ((unsigned)Heap[slot] < MinNodePointer) {
-				MinNodePointer = (unsigned)Heap[slot];
+				if ((uintptr_t)Heap[slot] > MaxNodePointer) {
+					MaxNodePointer = (unsigned)(uintptr_t)Heap[slot];
+				}
+				if ((uintptr_t)Heap[slot] < MinNodePointer) {
+					MinNodePointer = (unsigned)(uintptr_t)Heap[slot];
+				}
 			}
 		}
 	}

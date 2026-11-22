@@ -775,30 +775,124 @@ unsigned long opents_resource_size(void * handle)
 }
 
 
-int opents_resource_load_string(void * module_token, unsigned int id, char * buffer, int size)
+namespace {
+
+// OpenTS added string IDs 1043..1121 after the original 1999 Language.dll;
+// return the built-in English string when the loaded PE resource lacks them.
+char const * Fallback_OpenTS_String(unsigned int id)
 {
-	if (buffer == nullptr || size <= 0) {
-		return(0);
+	switch (id) {
+	case 1043: return("Place Building");
+	case 1044: return("Enters placement mode for the completed building waiting on the sidebar.");
+	case 1045: return("To Team:");
+	case 1046: return("To Observers:");
+	case 1047: return("%s [%s]");
+	case 1048: return("to team");
+	case 1049: return("to observers");
+	case 1050: return("to %s");
+	case 1051: return("Chat");
+	case 1052: return("Message to All");
+	case 1053: return("Starts a message to every player.");
+	case 1054: return("Message to Team");
+	case 1055: return("Starts a message to your allies, or to the other observers while you watch.");
+	case 1056: return("Auto-saving...");
+	case 1057: return("The game could not be auto-saved.");
+	case 1058: return("Auto-Save %d: %s");
+	case 1059: return("Multiplayer Game (Auto-Save)");
+	case 1060: return("The game could not be saved.");
+	case 1061: return("Repeat Last Building");
+	case 1062: return("Queues the last structure that was built, while it is still on the sidebar.");
+	case 1063: return("Repeat Last Infantry");
+	case 1064: return("Queues the last infantry that was trained, while it is still on the sidebar.");
+	case 1065: return("Repeat Last Vehicle");
+	case 1066: return("Queues the last vehicle that was built, while it is still on the sidebar.");
+	case 1067: return("Repeat Last Aircraft");
+	case 1068: return("Queues the last aircraft that was built, while it is still on the sidebar.");
+	case 1069: return("Scroll North-East");
+	case 1070: return("Scroll tactical map to the north-east.");
+	case 1071: return("Scroll South-East");
+	case 1072: return("Scroll tactical map to the south-east.");
+	case 1073: return("Scroll South-West");
+	case 1074: return("Scroll tactical map to the south-west.");
+	case 1075: return("Scroll North-West");
+	case 1076: return("Scroll tactical map to the north-west.");
+	case 1077: return("Jump Camera West");
+	case 1078: return("Jump tactical map to the west edge of the map.");
+	case 1079: return("Jump Camera East");
+	case 1080: return("Jump tactical map to the east edge of the map.");
+	case 1081: return("Jump Camera North");
+	case 1082: return("Jump tactical map to the north edge of the map.");
+	case 1083: return("Jump Camera South");
+	case 1084: return("Jump tactical map to the south edge of the map.");
+	case 1085: return("Music: Previous Track");
+	case 1086: return("Plays the previous music track.");
+	case 1087: return("Music: Next Track");
+	case 1088: return("Plays the next music track.");
+	case 1089: return("Now Playing: %s");
+	case 1090: return("Veterancy Filter");
+	case 1091: return("Narrows a mixed selection to its highest rank, and cycles through the ranks when pressed again.");
+	case 1092: return("Veterancy Filter (Add Lower)");
+	case 1093: return("Adds the next lower rank back to a filtered selection.");
+	case 1094: return("Health Filter");
+	case 1095: return("Narrows a mixed selection to its most damaged units, and cycles through the health bands when pressed again.");
+	case 1096: return("Health Filter (Add Lower)");
+	case 1097: return("Adds the next healthier band back to a filtered selection.");
+	case 1098: return("Select One Less");
+	case 1099: return("Removes the last unit from the selection.");
+	case 1100: return("Quick Save");
+	case 1101: return("Saves the game to the quick save file.");
+	case 1102: return("Quick Load");
+	case 1103: return("Loads the quick save file.");
+	case 1104: return("Quick Save: %s");
+	case 1105: return("No quick save to load.");
+	case 1106: return("%s wants to skip the video.");
+	case 1107: return("You want to skip the video.");
+	case 1108: return("%d players want to skip the video.");
+	case 1109: return("Press ESC to agree. (%d/%d)");
+	case 1110: return("Waiting for other players... (%d/%d)");
+	case 1111: return("Desynced");
+	case 1112: return("Quit");
+	case 1113: return("Loading in %d seconds...");
+	case 1114: return("Loading in 1 second...");
+	case 1115: return("Loading the saved game...");
+	case 1116: return("Type here to chat...");
+	case 1117: return("Difficulty: %s");
+	case 1118: return("Add To Team %2d");
+	case 1119: return("Adds the selected units to team %d and selects the whole team.");
+	case 1120: return("Game saved.");
+	case 1121: return("Game auto-saved.");
+	default:   return(nullptr);
 	}
-	buffer[0] = '\0';
+}
 
-	Module * module = As_Module(module_token);
-	if (module == nullptr) {
-		return(0);
+
+int Copy_Utf8_As_Windows_1252(std::string const & utf8, char * buffer, int size)
+{
+	std::string const ansi = UTF8::To_Windows_1252(utf8);
+	int count = (int)ansi.size();
+	if (count > size - 1) {
+		count = size - 1;
 	}
+	std::memcpy(buffer, ansi.data(), (size_t)count);
+	buffer[count] = '\0';
+	return(count);
+}
 
+
+int Load_String_From_Module(Module const & module, unsigned int id, char * buffer, int size)
+{
 	/* The tables are numbered from one and hold sixteen strings each. */
 	uint32_t const block = (id / kStringsPerBlock) + 1;
 	unsigned const index = id % kStringsPerBlock;
 
 	uint32_t rva = 0;
 	uint32_t length = 0;
-	if (!Find_Resource(*module, kTypeString, nullptr, block, nullptr, &rva, &length)) {
+	if (!Find_Resource(module, kTypeString, nullptr, block, nullptr, &rva, &length)) {
 		return(0);
 	}
 
 	uint32_t offset;
-	if (!Rva_To_Offset(*module, rva, &offset) || (size_t)offset + length > module->bytes.size()) {
+	if (!Rva_To_Offset(module, rva, &offset) || (size_t)offset + length > module.bytes.size()) {
 		return(0);
 	}
 
@@ -810,7 +904,7 @@ int opents_resource_load_string(void * module_token, unsigned int id, char * buf
 	**	shipped language files exactly, and the text it yields matches the
 	**	resource script the port carries character for character.
 	*/
-	uint8_t const * blob = module->bytes.data() + offset;
+	uint8_t const * blob = module.bytes.data() + offset;
 	size_t at = 0;
 
 	for (unsigned i = 0; i <= index; i++) {
@@ -845,18 +939,37 @@ int opents_resource_load_string(void * module_token, unsigned int id, char * buf
 				utf8.append(encoded, (size_t)UTF8::Encode(code, encoded));
 			}
 
-			std::string const ansi = UTF8::To_Windows_1252(utf8);
-
-			int count = (int)ansi.size();
-			if (count > size - 1) {
-				count = size - 1;
-			}
-			std::memcpy(buffer, ansi.data(), (size_t)count);
-			buffer[count] = '\0';
-			return(count);
+			return(Copy_Utf8_As_Windows_1252(utf8, buffer, size));
 		}
 
 		at += (size_t)units * 2;
 	}
 	return(0);
+}
+
+}  // namespace
+
+
+int opents_resource_load_string(void * module_token, unsigned int id, char * buffer, int size)
+{
+	if (buffer == nullptr || size <= 0) {
+		return(0);
+	}
+	buffer[0] = '\0';
+
+	Module * module = As_Module(module_token);
+	if (module == nullptr) {
+		return(0);
+	}
+
+	int count = Load_String_From_Module(*module, id, buffer, size);
+	if (count > 0) {
+		return(count);
+	}
+
+	char const * fallback = Fallback_OpenTS_String(id);
+	if (fallback == nullptr) {
+		return(0);
+	}
+	return(Copy_Utf8_As_Windows_1252(fallback, buffer, size));
 }

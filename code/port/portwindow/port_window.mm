@@ -121,6 +121,7 @@ static bool g_TestMovePending = false;
 // Self-test hook: when set, the next pump grows the window once so the
 // geometry-change path synthesises a WM_SIZE (+WM_MOVE) as a real resize does.
 static bool g_TestResizePending = false;
+static bool g_HoverTestLock = false;
 
 extern "C" void opents_test_trigger_move(void)
 {
@@ -365,7 +366,10 @@ static void Opents_Update_Cursor_From_Event(NSWindow * window, NSEvent * event)
 	if (window == nil || event == nil) {
 		return;
 	}
-	NSPoint on_screen = [window convertPointToScreen:[event locationInWindow]];
+	NSWindow * event_window = [event window];
+	NSPoint on_screen = (event_window != nil)
+		? [event_window convertPointToScreen:[event locationInWindow]]
+		: [event locationInWindow];
 	CGFloat scale = Opents_Scale_For_Screen([window screen]);
 	Opents_Cocoa_To_Screen(on_screen, scale, &g_CursorScreenX, &g_CursorScreenY);
 	g_CursorKnown = true;
@@ -394,7 +398,10 @@ static void Opents_Pointer_Position(int * x, int * y)
 // A position inside the content area, from an event, in client pixels.
 static void Opents_Event_Client_Point(NSWindow * window, NSEvent * event, int * x, int * y)
 {
-	NSPoint on_screen = [window convertPointToScreen:[event locationInWindow]];
+	NSWindow * event_window = [event window];
+	NSPoint on_screen = (event_window != nil)
+		? [event_window convertPointToScreen:[event locationInWindow]]
+		: [event locationInWindow];
 	NSRect content = Opents_Content_Rect(window);
 
 	/*
@@ -755,6 +762,40 @@ extern "C" void opents_window_show(void * hwnd)
 }
 
 
+extern "C" void opents_window_set_rect(void * hwnd, int x, int y, int w, int h)
+{
+	if (hwnd == nullptr || w <= 0 || h <= 0) {
+		return;
+	}
+	@autoreleasepool {
+		NSWindow * window = (__bridge NSWindow *)hwnd;
+		NSScreen * screen = [window screen] ?: [NSScreen mainScreen];
+		[window setContentSize:NSMakeSize((CGFloat)w, (CGFloat)h)];
+		if (screen != nil && x == 0 && y == 0) {
+			NSRect visible = [screen visibleFrame];
+			NSRect frame = [window frame];
+			CGFloat wx = visible.origin.x + (visible.size.width - frame.size.width) * 0.5;
+			CGFloat wy = visible.origin.y + (visible.size.height - frame.size.height) * 0.5;
+			if (wx < NSMinX(visible)) wx = NSMinX(visible);
+			if (wy < NSMinY(visible)) wy = NSMinY(visible);
+			[window setFrameOrigin:NSMakePoint(wx, wy)];
+		} else if (x != 0 || y != 0) {
+			CGFloat scale = Opents_Scale_For_Screen(screen);
+			NSRect frame = [window frame];
+			CGFloat wx = (CGFloat)x / scale;
+			CGFloat wy = Opents_Primary_Top() - (CGFloat)y / scale - frame.size.height;
+			[window setFrameOrigin:NSMakePoint(wx, wy)];
+		}
+		int cw = 0;
+		int ch = 0;
+		opents_window_get_client_size(hwnd, &cw, &ch);
+		Opents_Push_Message(window, OpentsWM_SIZE, 0,
+		                   (intptr_t)((cw & 0xFFFF) | ((ch & 0xFFFF) << 16)));
+		Opents_Push_Message(window, OpentsWM_MOVE, 0, 0);
+	}
+}
+
+
 extern "C" void opents_window_get_client_size(void * hwnd, int * width, int * height)
 {
 	int w = 0;
@@ -1061,7 +1102,9 @@ static void Opents_Process_Event(NSApplication * app, NSEvent * event)
 			case NSEventTypeLeftMouseDragged:
 			case NSEventTypeRightMouseDragged:
 			case NSEventTypeOtherMouseDragged:
-				Opents_Push_Mouse_Move(g_Window, event);
+				if (!g_HoverTestLock) {
+					Opents_Push_Mouse_Move(g_Window, event);
+				}
 				break;
 
 			case NSEventTypeScrollWheel:
@@ -1133,7 +1176,7 @@ extern "C" void opents_window_pump(void)
 				fflush(stderr);
 			}
 
-			const bool active = [app isActive] || (g_Window != nil && [g_Window isKeyWindow]);
+			const bool active = g_HoverTestLock || [app isActive] || (g_Window != nil && [g_Window isKeyWindow]);
 			if (active && !g_AppActive) {
 				// Just became the active application: make our window the key window
 				// so keyboard and mouse input are routed to it rather than lingering
@@ -1241,6 +1284,25 @@ extern "C" void opents_window_pump(void)
 				}
 				fclose(cf);
 				unlink("/tmp/opents_click");
+			}
+			FILE * hf = (inject_gate == 1) ? fopen("/tmp/opents_hover", "r") : NULL;
+			if (hf != NULL) {
+				int cx = -1, cy = -1;
+				if (fscanf(hf, "%d %d", &cx, &cy) == 2 && cx >= 0 && cy >= 0) {
+					int ox = 0;
+					int oy = 0;
+					Opents_Content_Origin(g_Window, &ox, &oy);
+					g_CursorScreenX = ox + cx;
+					g_CursorScreenY = oy + cy;
+					g_CursorKnown = true;
+					g_HoverTestLock = true;
+					const intptr_t lp = (intptr_t)(((cy & 0xFFFF) << 16) | (cx & 0xFFFF));
+					Opents_Push_Message(g_Window, OpentsWM_MOUSEMOVE, 0, lp);
+					OPENTS_IF_IO_TRACE fprintf(stderr, "[PORT] injected hover at %d,%d\n", cx, cy);
+					fflush(stderr);
+				}
+				fclose(hf);
+				unlink("/tmp/opents_hover");
 			}
 		}
 	}

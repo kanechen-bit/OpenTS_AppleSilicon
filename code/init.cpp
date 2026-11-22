@@ -6081,6 +6081,17 @@ static void Init_Commands(void)
 
 	Init_Hotkeys();
 
+	for (int i = HotkeyCommands.Count() - 1; i >= 0; i--) {
+		int id = HotkeyCommands.Fetch_ID_By_Position(i);
+		int vk = id & 0xFF;
+		if (vk >= VK_LEFT && vk <= VK_DOWN) {
+			const CommandClass * cmd = HotkeyCommands.Fetch_By_Position(i);
+			if (cmd != NULL && strstr(cmd->Get_Unique_Name(), "Sidebar") != NULL) {
+				HotkeyCommands.Remove_Index(id);
+			}
+		}
+	}
+
 	if (HotkeyCommands.Is_Present(KN_DELETE)) {
 		HotkeyCommands.Remove_Index(KN_DELETE);
 	}
@@ -6125,6 +6136,10 @@ bool Init_Hotkeys(void)
 			}
 
 			if ((command != NULL) && (id != 0)) {
+				int vk = id & 0xFF;
+				if (vk >= VK_LEFT && vk <= VK_DOWN && strstr(command->Get_Unique_Name(), "Sidebar") != NULL) {
+					continue;
+				}
 				HotkeyCommands.Add_Index(id, command);
 			}
 		}

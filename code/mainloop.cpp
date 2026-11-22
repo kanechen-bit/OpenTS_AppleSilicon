@@ -499,6 +499,10 @@ void Keyboard_Process(KeyNumType & input)
 	const CommandClass * cmd = HotkeyCommands[key];
 
 	if (cmd != NULL) {
+		int vk = key & 0xFF;
+		if (vk >= VK_LEFT && vk <= VK_DOWN && strstr(cmd->Get_Unique_Name(), "Sidebar") != NULL) {
+			return;
+		}
 
 		cmd->Execute();
 

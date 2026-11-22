@@ -51,4 +51,9 @@ bool opents_msg_peek(OpentsMsg * out);
 void  opents_set_wndproc(OpentsWndProc proc);
 OpentsWndProc opents_get_wndproc(void);
 
+// Deadline-backed Win32 timer table. Implemented in port_msgqueue.cpp.
+uintptr_t opents_timer_set(void * hwnd, uintptr_t id, unsigned elapse_ms, void * proc);
+bool opents_timer_kill(void * hwnd, uintptr_t id);
+void opents_timer_pump(void);
+
 #endif  // __cplusplus

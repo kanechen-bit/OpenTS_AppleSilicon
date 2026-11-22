@@ -13,8 +13,49 @@
 // calls the registered WNDPROC -- exactly the Win32 dispatch model, minus the OS.
 
 #include "port_bridge.h"
+#include "port_trace.h"
 
+#include <chrono>
 #include <deque>
+#include <vector>
+
+namespace {
+
+constexpr unsigned OPENTS_WM_TIMER = 0x0113u;
+constexpr unsigned OPENTS_MIN_TIMER_MS = 10u;
+
+struct OpentsTimer {
+	void * hwnd;
+	uintptr_t id;
+	unsigned elapse_ms;
+	void * proc;
+	std::chrono::steady_clock::time_point next_fire;
+};
+
+std::vector<OpentsTimer> g_Timers;
+
+void purge_queued_timer_messages(std::deque<OpentsMsg> & queue, void * hwnd, uintptr_t id)
+{
+	for (auto it = queue.begin(); it != queue.end(); ) {
+		if (it->message == OPENTS_WM_TIMER && it->hwnd == hwnd && it->wParam == id) {
+			it = queue.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+bool has_queued_timer_message(std::deque<OpentsMsg> const & queue, void * hwnd, uintptr_t id)
+{
+	for (OpentsMsg const & msg : queue) {
+		if (msg.message == OPENTS_WM_TIMER && msg.hwnd == hwnd && msg.wParam == id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+}  // namespace
 
 
 // Single window procedure for the main window. Dialogs (Phase 2d) will need a
@@ -66,4 +107,63 @@ void opents_set_wndproc(OpentsWndProc proc)
 OpentsWndProc opents_get_wndproc(void)
 {
 	return g_WndProc;
+}
+
+
+uintptr_t opents_timer_set(void * hwnd, uintptr_t id, unsigned elapse_ms, void * proc)
+{
+	const unsigned clamped = elapse_ms < OPENTS_MIN_TIMER_MS ? OPENTS_MIN_TIMER_MS : elapse_ms;
+	const auto next_fire = std::chrono::steady_clock::now() + std::chrono::milliseconds(clamped);
+
+	purge_queued_timer_messages(g_MessageQueue, hwnd, id);
+
+	for (OpentsTimer & timer : g_Timers) {
+		if (timer.hwnd == hwnd && timer.id == id) {
+			timer.elapse_ms = clamped;
+			timer.proc = proc;
+			timer.next_fire = next_fire;
+			return id != 0 ? id : 1u;
+		}
+	}
+
+	g_Timers.push_back(OpentsTimer{ hwnd, id, clamped, proc, next_fire });
+	return id != 0 ? id : 1u;
+}
+
+
+bool opents_timer_kill(void * hwnd, uintptr_t id)
+{
+	purge_queued_timer_messages(g_MessageQueue, hwnd, id);
+
+	for (auto it = g_Timers.begin(); it != g_Timers.end(); ++it) {
+		if (it->hwnd == hwnd && it->id == id) {
+			g_Timers.erase(it);
+			return true;
+		}
+	}
+	return false;
+}
+
+
+void opents_timer_pump(void)
+{
+	if (g_Timers.empty()) {
+		return;
+	}
+
+	const auto now = std::chrono::steady_clock::now();
+	for (OpentsTimer & timer : g_Timers) {
+		if (now >= timer.next_fire) {
+			timer.next_fire = now + std::chrono::milliseconds(timer.elapse_ms);
+			if (!has_queued_timer_message(g_MessageQueue, timer.hwnd, timer.id)) {
+				OpentsMsg msg;
+				msg.hwnd = timer.hwnd;
+				msg.message = OPENTS_WM_TIMER;
+				msg.wParam = timer.id;
+				msg.lParam = (intptr_t)timer.proc;
+				g_MessageQueue.push_back(msg);
+				OPENTS_IF_IO_TRACE std::fprintf(stderr, "[PORTTIMER] fire id=0x%zX\n", (size_t)timer.id);
+			}
+		}
+	}
 }

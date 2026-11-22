@@ -53,6 +53,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <errno.h>
+#include <time.h>
 #include <cwchar>
 #include <cstddef>
 
@@ -384,12 +385,24 @@ typedef struct _BY_HANDLE_FILE_INFORMATION {
 #endif
 
 /* Windows epoch (1601-01-01) is 11644473600 seconds before the Unix epoch. */
-inline FILETIME PosixTimeToFileTime(time_t t) {
-	uint64_t ft = ((uint64_t)t + 11644473600ULL) * 10000000ULL;
+inline constexpr uint64_t OPENTS_FILETIME_EPOCH_SEC = 11644473600ULL;
+inline constexpr uint64_t OPENTS_FILETIME_TICKS_PER_SEC = 10000000ULL;
+
+inline uint64_t Opents_FileTime_To_Ticks(const FILETIME *f) {
+	if (f == nullptr) {
+		return 0;
+	}
+	return (static_cast<uint64_t>(f->dwHighDateTime) << 32) | static_cast<uint64_t>(f->dwLowDateTime);
+}
+inline FILETIME Opents_Ticks_To_FileTime(uint64_t ft) {
 	FILETIME f;
-	f.dwLowDateTime = (DWORD)(ft & 0xFFFFFFFFULL);
-	f.dwHighDateTime = (DWORD)(ft >> 32);
+	f.dwLowDateTime = static_cast<DWORD>(ft & 0xFFFFFFFFULL);
+	f.dwHighDateTime = static_cast<DWORD>(ft >> 32);
 	return f;
+}
+inline FILETIME PosixTimeToFileTime(time_t t) {
+	uint64_t ft = (static_cast<uint64_t>(t) + OPENTS_FILETIME_EPOCH_SEC) * OPENTS_FILETIME_TICKS_PER_SEC;
+	return Opents_Ticks_To_FileTime(ft);
 }
 inline BOOL GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION *info) {
 	if (!info) return FALSE;
@@ -819,6 +832,12 @@ inline HWND   CreateWindowEx(DWORD ex, const char *cls, const char *name, DWORD 
 			** otherwise overwrite g_MainClassName with "ComboDropWin" and
 			** misroute every main-window proc lookup. */
 			opents_win_register_class_name(cls);
+			/* Deliver WM_CREATE synchronously so Windows_Procedure can
+			** construct main-window subsystems such as ToolTips. */
+			OpentsWndProc main_proc = opents_get_wndproc();
+			if (main_proc != nullptr) {
+				main_proc(window, 0x0001, 0, 0);
+			}
 			int cw = 0;
 			int ch = 0;
 			opents_window_get_client_size(window, &cw, &ch);
@@ -874,8 +893,12 @@ inline LONG   SetWindowLong(HWND w, int i, LONG v) {
 }
 inline void   SetCapture(HWND w) { opents_input_set_capture((void *)w); }
 inline void   ReleaseCapture(void) { opents_input_set_capture(nullptr); }
-inline UINT   SetTimer(HWND w, UINT id, UINT elapse, void *proc) { (void)w;(void)id;(void)elapse;(void)proc; return 1; }
-inline BOOL   KillTimer(HWND w, UINT id) { (void)w;(void)id; return TRUE; }
+inline UINT   SetTimer(HWND w, UINT id, UINT elapse, void *proc) {
+	return (UINT)opents_timer_set((void *)w, (uintptr_t)id, (unsigned)elapse, proc);
+}
+inline BOOL   KillTimer(HWND w, UINT id) {
+	return opents_timer_kill((void *)w, (uintptr_t)id) ? TRUE : FALSE;
+}
 inline void   SetCursor(HCURSOR c) { opents_cursor_apply(c); }
 inline int    MessageBoxA(HWND w, const char *t, const char *c, UINT type) { (void)w;(void)t;(void)c;(void)type; return 1; }
 inline int    MessageBox(HWND w, const char *t, const char *c, UINT type) { return MessageBoxA(w, t, c, type); }
@@ -1405,24 +1428,24 @@ inline void GlobalMemoryStatus(MEMORYSTATUS *lpBuffer) {
  * 0000-00-00 00:00:00, which names the file DEBUG_00-00-0000_00-00-00.LOG and
  * stamps every record 00:00:00.000 — including the ones a startup hang is
  * diagnosed from. */
+inline void Opents_Tm_To_SystemTime(const struct tm &parts, WORD ms, SYSTEMTIME *s) {
+	s->wYear         = static_cast<WORD>(parts.tm_year + 1900);
+	s->wMonth        = static_cast<WORD>(parts.tm_mon + 1);
+	s->wDayOfWeek    = static_cast<WORD>(parts.tm_wday);
+	s->wDay          = static_cast<WORD>(parts.tm_mday);
+	s->wHour         = static_cast<WORD>(parts.tm_hour);
+	s->wMinute       = static_cast<WORD>(parts.tm_min);
+	s->wSecond       = static_cast<WORD>(parts.tm_sec);
+	s->wMilliseconds = ms;
+}
 inline void GetLocalTime(SYSTEMTIME *lpSystemTime) {
 	if (lpSystemTime == nullptr) return;
-
-	time_t now = ::time(nullptr);
-	struct tm parts;
-	localtime_r(&now, &parts);
-
-	lpSystemTime->wYear         = static_cast<WORD>(parts.tm_year + 1900);
-	lpSystemTime->wMonth        = static_cast<WORD>(parts.tm_mon + 1);
-	lpSystemTime->wDayOfWeek    = static_cast<WORD>(parts.tm_wday);
-	lpSystemTime->wDay          = static_cast<WORD>(parts.tm_mday);
-	lpSystemTime->wHour         = static_cast<WORD>(parts.tm_hour);
-	lpSystemTime->wMinute       = static_cast<WORD>(parts.tm_min);
-	lpSystemTime->wSecond       = static_cast<WORD>(parts.tm_sec);
-
-	struct timeval clock;
+	struct timeval clock {};
 	gettimeofday(&clock, nullptr);
-	lpSystemTime->wMilliseconds = static_cast<WORD>(clock.tv_usec / 1000);
+	time_t now = clock.tv_sec;
+	struct tm parts {};
+	localtime_r(&now, &parts);
+	Opents_Tm_To_SystemTime(parts, static_cast<WORD>(clock.tv_usec / 1000), lpSystemTime);
 }
 inline BOOL VerQueryValue(const void * /*pBlock*/, const char * /*lpSubBlock*/, void **ppBuffer, UINT *puLen) {
 	(void)ppBuffer; (void)puLen; return FALSE;
@@ -1430,6 +1453,9 @@ inline BOOL VerQueryValue(const void * /*pBlock*/, const char * /*lpSubBlock*/, 
 inline BOOL GetMessage(MSG *lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) {
 	(void)hWnd; (void)wMsgFilterMin; (void)wMsgFilterMax;
 	OpentsMsg m;
+	if (!opents_msg_peek(&m)) {
+		opents_timer_pump();
+	}
 	if (opents_msg_pop(&m)) {
 		if (lpMsg != nullptr) {
 			lpMsg->hwnd = (HWND)m.hwnd;
@@ -2126,8 +2152,14 @@ inline LRESULT SendDlgItemMessage(HWND h, int id, UINT m, WPARAM w, LPARAM l) {
 inline BOOL    SetForegroundWindow(HWND h) { (void)h; return TRUE; }
 inline BOOL    DestroyWindow(HWND h) { opents_win_destroy((void *)h); return TRUE; }
 inline BOOL    MoveWindow(HWND h, int x, int y, int w, int hgt, BOOL b) {
+	if (h != nullptr && opents_win_is_main((void *)h)) {
+		opents_window_set_rect((void *)h, x, y, w, hgt);
+		return TRUE;
+	}
 	opents_win_set_rect((void *)h, x, y, w, hgt);
-	if (b) opents_win_set_visible((void *)h, 1);
+	if (b && opents_win_is_visible((void *)h)) {
+		opents_win_repaint_tree((void *)h);
+	}
 	return TRUE;
 }
 inline BOOL    IsWindow(HWND h) { return opents_win_is_valid((void *)h) ? TRUE : FALSE; }
@@ -2356,7 +2388,30 @@ inline HICON   CreateIconIndirect(const ICONINFO * info) {
 	}
 	return (HICON)opents_cursor_create(info->hbmColor, (int)info->xHotspot, (int)info->yHotspot);
 }
-inline BOOL    GetTextExtentPoint32(HDC h, LPCTSTR s, int n, LPSIZE p) { (void)h;(void)s;(void)n;(void)p; return TRUE; }
+inline BOOL    GetTextExtentPoint32(HDC h, LPCTSTR s, int n, LPSIZE p) {
+	(void)h;
+	if (p == nullptr) {
+		return FALSE;
+	}
+	int width = 0;
+	if (s != nullptr && n > 0) {
+		for (int i = 0; i < n && s[i] != '\0'; i++) {
+			unsigned char ch = static_cast<unsigned char>(s[i]);
+			if (ch == ' ' || ch == 'i' || ch == 'l' || ch == 'I' || ch == '1' ||
+			    ch == '.' || ch == ',' || ch == ':' || ch == ';' || ch == '!' ||
+			    ch == '/' || ch == '|' || ch == '\'' || ch == '`') {
+				width += 4;
+			} else if (ch == 'm' || ch == 'w' || ch == 'M' || ch == 'W' || ch == '@') {
+				width += 8;
+			} else {
+				width += 6;
+			}
+		}
+	}
+	p->cx = width;
+	p->cy = 14;
+	return TRUE;
+}
 inline BOOL    TextOut(HDC h, int x, int y, LPCTSTR s, int n) { (void)h;(void)x;(void)y;(void)s;(void)n; return TRUE; }
 inline BOOL    GdiFlush(void) { return TRUE; }
 inline BOOL    DeleteObject(HANDLE h) { opents_gdi_delete_object((void *)h); return TRUE; }
@@ -2492,23 +2547,42 @@ inline BOOL    SetConsoleOutputCP(UINT c) { (void)c; return TRUE; }
 inline BOOL    SetConsoleCP(UINT c) { (void)c; return TRUE; }
 inline BOOL    GetConsoleScreenBufferInfo(HANDLE h, CONSOLE_SCREEN_BUFFER_INFO *i) { (void)h; (void)i; return TRUE; }
 inline BOOL    SetConsoleScreenBufferSize(HANDLE h, COORD c) { (void)h; (void)c; return TRUE; }
-inline LONG    CompareFileTime(const FILETIME *a, const FILETIME *b) { (void)a;(void)b; return 0; }
-inline BOOL    SystemTimeToFileTime(const SYSTEMTIME *s, FILETIME *f) { (void)s; (void)f; return TRUE; }
+inline LONG    CompareFileTime(const FILETIME *a, const FILETIME *b) {
+	uint64_t const va = Opents_FileTime_To_Ticks(a);
+	uint64_t const vb = Opents_FileTime_To_Ticks(b);
+	if (va < vb) return -1;
+	if (va > vb) return 1;
+	return 0;
+}
+inline BOOL    SystemTimeToFileTime(const SYSTEMTIME *s, FILETIME *f) {
+	if (s == nullptr || f == nullptr) return FALSE;
+	struct tm parts {};
+	parts.tm_year  = static_cast<int>(s->wYear) - 1900;
+	parts.tm_mon   = static_cast<int>(s->wMonth) - 1;
+	parts.tm_mday  = static_cast<int>(s->wDay);
+	parts.tm_hour  = static_cast<int>(s->wHour);
+	parts.tm_min   = static_cast<int>(s->wMinute);
+	parts.tm_sec   = static_cast<int>(s->wSecond);
+	parts.tm_isdst = 0;
+	time_t utc = ::timegm(&parts);
+	if (utc == static_cast<time_t>(-1) ||
+	    static_cast<int64_t>(utc) < -static_cast<int64_t>(OPENTS_FILETIME_EPOCH_SEC)) {
+		return FALSE;
+	}
+	uint64_t ticks = (static_cast<uint64_t>(static_cast<int64_t>(utc) +
+		static_cast<int64_t>(OPENTS_FILETIME_EPOCH_SEC)) * OPENTS_FILETIME_TICKS_PER_SEC) +
+		static_cast<uint64_t>(s->wMilliseconds) * 10000ULL;
+	*f = Opents_Ticks_To_FileTime(ticks);
+	return TRUE;
+}
 inline void    GetSystemTime(SYSTEMTIME *s) {
 	if (s == nullptr) return;
-
-	time_t now = ::time(nullptr);
-	struct tm parts;
+	struct timeval tv {};
+	gettimeofday(&tv, nullptr);
+	time_t now = tv.tv_sec;
+	struct tm parts {};
 	gmtime_r(&now, &parts);
-
-	s->wYear         = static_cast<WORD>(parts.tm_year + 1900);
-	s->wMonth        = static_cast<WORD>(parts.tm_mon + 1);
-	s->wDayOfWeek    = static_cast<WORD>(parts.tm_wday);
-	s->wDay          = static_cast<WORD>(parts.tm_mday);
-	s->wHour         = static_cast<WORD>(parts.tm_hour);
-	s->wMinute       = static_cast<WORD>(parts.tm_min);
-	s->wSecond       = static_cast<WORD>(parts.tm_sec);
-	s->wMilliseconds = 0;
+	Opents_Tm_To_SystemTime(parts, static_cast<WORD>(tv.tv_usec / 1000), s);
 }
 inline BOOL    CopyFile(LPCTSTR a, LPCTSTR b, BOOL f) { (void)a;(void)b;(void)f; return TRUE; }
 inline int     freopen_s(FILE **p, const char *n, const char *m, FILE *s) { (void)p;(void)n;(void)m;(void)s; return 0; }
@@ -3004,8 +3078,58 @@ inline BOOL    StretchBlt(HDC d,int a,int b,int c,int e,HDC s,int f,int g,int h,
 inline BOOL    RedrawWindow(HWND h, const RECT *r, void *g, UINT f) { (void)h;(void)r;(void)g;(void)f; return TRUE; }
 inline BOOL    EndDialog(HWND h, intptr_t r) { opents_win_end_dialog((void *)h, r); return TRUE; }
 inline intptr_t DialogBoxParam(HINSTANCE h, LPCTSTR t, HWND w, DLGPROC p, LPARAM l) { (void)h;(void)t;(void)w;(void)p;(void)l; return 0; }
-inline BOOL    FileTimeToLocalFileTime(const FILETIME *a, FILETIME *b) { (void)a;(void)b; return TRUE; }
-inline BOOL    FileTimeToSystemTime(const FILETIME *a, SYSTEMTIME *b) { (void)a;(void)b; return TRUE; }
+inline BOOL    FileTimeToLocalFileTime(const FILETIME *a, FILETIME *b) {
+	if (a == nullptr || b == nullptr) return FALSE;
+	uint64_t const ticks = Opents_FileTime_To_Ticks(a);
+	constexpr uint64_t kEpochTicks = OPENTS_FILETIME_EPOCH_SEC * OPENTS_FILETIME_TICKS_PER_SEC;
+	if (ticks < kEpochTicks) {
+		*b = *a;
+		return TRUE;
+	}
+	time_t const utc_sec = static_cast<time_t>((ticks - kEpochTicks) / OPENTS_FILETIME_TICKS_PER_SEC);
+	uint64_t const subsec = (ticks - kEpochTicks) % OPENTS_FILETIME_TICKS_PER_SEC;
+	struct tm local_tm {};
+	if (::localtime_r(&utc_sec, &local_tm) == nullptr) {
+		*b = *a;
+		return FALSE;
+	}
+	struct tm utc_equiv {};
+	utc_equiv.tm_year  = local_tm.tm_year;
+	utc_equiv.tm_mon   = local_tm.tm_mon;
+	utc_equiv.tm_mday  = local_tm.tm_mday;
+	utc_equiv.tm_hour  = local_tm.tm_hour;
+	utc_equiv.tm_min   = local_tm.tm_min;
+	utc_equiv.tm_sec   = local_tm.tm_sec;
+	utc_equiv.tm_isdst = 0;
+	time_t const local_as_utc = ::timegm(&utc_equiv);
+	if (local_as_utc == static_cast<time_t>(-1) ||
+	    static_cast<int64_t>(local_as_utc) < -static_cast<int64_t>(OPENTS_FILETIME_EPOCH_SEC)) {
+		*b = *a;
+		return FALSE;
+	}
+	uint64_t const local_ticks = (static_cast<uint64_t>(static_cast<int64_t>(local_as_utc) +
+		static_cast<int64_t>(OPENTS_FILETIME_EPOCH_SEC)) * OPENTS_FILETIME_TICKS_PER_SEC) + subsec;
+	*b = Opents_Ticks_To_FileTime(local_ticks);
+	return TRUE;
+}
+inline BOOL    FileTimeToSystemTime(const FILETIME *a, SYSTEMTIME *b) {
+	if (a == nullptr || b == nullptr) return FALSE;
+	uint64_t const ticks = Opents_FileTime_To_Ticks(a);
+	constexpr uint64_t kEpochTicks = OPENTS_FILETIME_EPOCH_SEC * OPENTS_FILETIME_TICKS_PER_SEC;
+	if (ticks < kEpochTicks) {
+		std::memset(b, 0, sizeof(*b));
+		return FALSE;
+	}
+	time_t const sec = static_cast<time_t>((ticks - kEpochTicks) / OPENTS_FILETIME_TICKS_PER_SEC);
+	uint64_t const subsec = (ticks - kEpochTicks) % OPENTS_FILETIME_TICKS_PER_SEC;
+	struct tm parts {};
+	if (::gmtime_r(&sec, &parts) == nullptr) {
+		std::memset(b, 0, sizeof(*b));
+		return FALSE;
+	}
+	Opents_Tm_To_SystemTime(parts, static_cast<WORD>(subsec / 10000ULL), b);
+	return TRUE;
+}
 inline BOOL    GetMonitorInfo(HMONITOR h, void *i) { (void)h;(void)i; return TRUE; }
 inline LONG    RegQueryValueEx(HKEY k, LPCTSTR n, DWORD *r, DWORD *t, BYTE *d, DWORD *c) { (void)k;(void)n;(void)r;(void)t;(void)d;(void)c; return 0; }
 inline LONG    RegCloseKey(HKEY k) { (void)k; return 0; }
@@ -3137,8 +3261,45 @@ inline LRESULT CallWindowProc(WNDPROC p, HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 inline DWORD   GetWindowContextHelpId(HWND h) { (void)h; return 0; }
 inline BOOL    DeleteMenu(HMENU m, UINT p, UINT f) { (void)m;(void)p;(void)f; return TRUE; }
-inline int     GetDateFormat(DWORD loc, DWORD fl, const SYSTEMTIME *t, LPCTSTR fmt, LPTSTR out, int n) { (void)loc;(void)fl;(void)t;(void)fmt; if(out&&n>0)out[0]=0; (void)n; return 0; }
-inline int     GetTimeFormat(DWORD loc, DWORD fl, const SYSTEMTIME *t, LPCTSTR fmt, LPTSTR out, int n) { (void)loc;(void)fl;(void)t;(void)fmt; if(out&&n>0)out[0]=0; (void)n; return 0; }
+inline int     Opents_Write_Formatted_String(const char *text, int len, LPTSTR out, int n) {
+	if (len < 0) return 0;
+	if (n == 0) return len + 1;
+	if (out == nullptr || n < 0 || n <= len) {
+		if (out != nullptr && n > 0) out[0] = '\0';
+		return 0;
+	}
+	std::memcpy(out, text, static_cast<size_t>(len + 1));
+	return len + 1;
+}
+inline int     GetDateFormat(DWORD loc, DWORD fl, const SYSTEMTIME *t, LPCTSTR fmt, LPTSTR out, int n) {
+	(void)loc; (void)fl; (void)fmt;
+	SYSTEMTIME now;
+	if (t == nullptr) {
+		GetLocalTime(&now);
+		t = &now;
+	}
+	char buf[32];
+	int len = std::snprintf(buf, sizeof(buf), "%02u/%02u/%02u",
+		static_cast<unsigned>(t->wMonth), static_cast<unsigned>(t->wDay),
+		static_cast<unsigned>(t->wYear % 100));
+	return Opents_Write_Formatted_String(buf, len, out, n);
+}
+inline int     GetTimeFormat(DWORD loc, DWORD fl, const SYSTEMTIME *t, LPCTSTR fmt, LPTSTR out, int n) {
+	(void)loc; (void)fmt;
+	SYSTEMTIME now;
+	if (t == nullptr) {
+		GetLocalTime(&now);
+		t = &now;
+	}
+	char buf[32];
+	int len = (fl & TIME_NOSECONDS) != 0
+		? std::snprintf(buf, sizeof(buf), "%02u:%02u",
+			static_cast<unsigned>(t->wHour), static_cast<unsigned>(t->wMinute))
+		: std::snprintf(buf, sizeof(buf), "%02u:%02u:%02u",
+			static_cast<unsigned>(t->wHour), static_cast<unsigned>(t->wMinute),
+			static_cast<unsigned>(t->wSecond));
+	return Opents_Write_Formatted_String(buf, len, out, n);
+}
 inline BOOL    SetWindowTextA(HWND h, const char *t) { (void)h; (void)t; return TRUE; }
 inline LONG    RegOpenKeyEx(HKEY k, LPCTSTR n, DWORD o, DWORD s, HKEY *r) { (void)k;(void)n;(void)o;(void)s; if(r)*r=nullptr; return 0; }
 inline BOOL    GetUpdateRect(HWND h, RECT *r, BOOL e) {
@@ -3182,7 +3343,19 @@ inline BOOL    SetCurrentDirectory(LPCTSTR d) { (void)d; return TRUE; }
 inline void    PostQuitMessage(int c) { (void)c; }
 inline int     SetGraphicsMode(HDC h, int m) { (void)h;(void)m; return 1; }
 inline BOOL    ModifyWorldTransform(HDC h, const void *x, DWORD m) { (void)h;(void)x;(void)m; return TRUE; }
-inline BOOL    GetTextMetrics(HDC h, TEXTMETRIC *t) { (void)h;(void)t; return TRUE; }
+inline BOOL    GetTextMetrics(HDC h, TEXTMETRIC *t) {
+	(void)h;
+	if (t == nullptr) {
+		return FALSE;
+	}
+	std::memset(t, 0, sizeof(*t));
+	t->tmHeight = 12;
+	t->tmAscent = 10;
+	t->tmDescent = 2;
+	t->tmAveCharWidth = 6;
+	t->tmMaxCharWidth = 12;
+	return TRUE;
+}
 inline BOOL    WinHelp(HWND h, LPCTSTR f, UINT c, ULONG_PTR d) { (void)h;(void)f;(void)c;(void)d; return TRUE; }
 inline BOOL    RegisterHotKey(HWND h, int id, UINT m, UINT k) { (void)h;(void)id;(void)m;(void)k; return TRUE; }
 inline HWND    FindWindow(LPCTSTR c, LPCTSTR w) { (void)c;(void)w; return nullptr; }

@@ -130,6 +130,9 @@ static BackendScaleMode Backend_Scale_Mode(void)
 		case VIDEO_SCALE_SUPERSAMPLE:
 			return(BACKEND_SCALE_SUPERSAMPLE);
 
+		case VIDEO_SCALE_ARTCNN:
+			return(BACKEND_SCALE_ARTCNN);
+
 		default:
 			return(BACKEND_SCALE_PIXELART);
 	}

@@ -2202,43 +2202,205 @@ void Exception_Wndproc_Test_Fault(void)
 
 #else
 
-void Install_Exception_Handler(void)
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+
+static char RegisteredLogFile[512] = {0};
+static char TestMode[64] = {0};
+static char AltStack[64 * 1024];
+
+bool Describe_Code_Address(void const * address, char * buffer, unsigned size)
 {
-}
+	if (buffer == NULL || size == 0) {
+		return(false);
+	}
+	buffer[0] = '\0';
 
-
-void Exception_Register_Log_File(char const *)
-{
-}
-
-
-bool Describe_Code_Address(void const *, char * buffer, unsigned size)
-{
-	if (buffer != NULL && size != 0) {
-		buffer[0] = '\0';
+	Dl_info info;
+	if (dladdr(address, &info) != 0) {
+		char const * sym = info.dli_sname ? info.dli_sname : "?";
+		uintptr_t offset = (uintptr_t)address - (uintptr_t)info.dli_saddr;
+		char const * fname = info.dli_fname ? info.dli_fname : "?";
+		char const * slash = strrchr(fname, '/');
+		if (slash != NULL) {
+			fname = slash + 1;
+		}
+		snprintf(buffer, size, "%s!%s+0x%lx", fname, sym, (unsigned long)offset);
+		return(true);
 	}
 
 	return(false);
 }
 
-
-void Exception_Set_Test_Mode(char const *)
+static void Posix_Signal_Handler(int signum, siginfo_t * info, void * context)
 {
+	(void)context;
+	static volatile sig_atomic_t in_handler = 0;
+	if (in_handler) {
+		_exit(128 + signum);
+	}
+	in_handler = 1;
+
+	fflush(stdout);
+	fflush(stderr);
+
+	char const * signame = "UNKNOWN";
+	switch (signum) {
+		case SIGSEGV: signame = "SIGSEGV (Segmentation Fault)"; break;
+		case SIGBUS:  signame = "SIGBUS (Bus Error)"; break;
+		case SIGILL:  signame = "SIGILL (Illegal Instruction)"; break;
+		case SIGFPE:  signame = "SIGFPE (Floating Point Exception)"; break;
+		case SIGABRT: signame = "SIGABRT (Abort)"; break;
+		case SIGTRAP: signame = "SIGTRAP (Trace/Breakpoint Trap)"; break;
+		default:      break;
+	}
+
+	void * callstack[64];
+	int frames = backtrace(callstack, 64);
+
+	int log_fd = -1;
+	if (RegisteredLogFile[0] != '\0') {
+		log_fd = open(RegisteredLogFile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	}
+	int tmp_fd = open("/tmp/opents_crash.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+	auto write_str = [&](int fd, char const * str) {
+		if (fd >= 0 && str != NULL) {
+			size_t len = strlen(str);
+			(void)write(fd, str, len);
+		}
+	};
+
+	char header[512];
+	time_t now = time(NULL);
+	struct tm tm_buf;
+	localtime_r(&now, &tm_buf);
+	char time_str[64];
+	strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+	snprintf(header, sizeof(header),
+		"\n"
+		"======================================================================\n"
+		"CRASH CAUGHT BY OPENTS SIGNAL HANDLER\n"
+		"Time: %s\n"
+		"Signal: %d [%s]\n"
+		"Fault Address: %p\n"
+		"======================================================================\n"
+		"Stack backtrace (%d frames):\n",
+		time_str, signum, signame, info ? info->si_addr : NULL, frames);
+
+	write_str(STDERR_FILENO, header);
+	if (log_fd >= 0) write_str(log_fd, header);
+	if (tmp_fd >= 0) write_str(tmp_fd, header);
+
+	for (int i = 0; i < frames; i++) {
+		char desc[256];
+		if (Describe_Code_Address(callstack[i], desc, sizeof(desc))) {
+			char line[384];
+			snprintf(line, sizeof(line), "  [%2d] %p: %s\n", i, callstack[i], desc);
+			write_str(STDERR_FILENO, line);
+			if (log_fd >= 0) write_str(log_fd, line);
+			if (tmp_fd >= 0) write_str(tmp_fd, line);
+		} else {
+			backtrace_symbols_fd(&callstack[i], 1, STDERR_FILENO);
+			if (log_fd >= 0) backtrace_symbols_fd(&callstack[i], 1, log_fd);
+			if (tmp_fd >= 0) backtrace_symbols_fd(&callstack[i], 1, tmp_fd);
+		}
+	}
+
+	char footer[] = "======================================================================\n\n";
+	write_str(STDERR_FILENO, footer);
+	if (log_fd >= 0) {
+		write_str(log_fd, footer);
+		fsync(log_fd);
+		close(log_fd);
+	}
+	if (tmp_fd >= 0) {
+		write_str(tmp_fd, footer);
+		fsync(tmp_fd);
+		close(tmp_fd);
+	}
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	sigaction(signum, &sa, NULL);
+	raise(signum);
 }
 
+void Install_Exception_Handler(void)
+{
+	static bool installed = false;
+	if (installed) {
+		return;
+	}
+	installed = true;
+
+	stack_t ss;
+	memset(&ss, 0, sizeof(ss));
+	ss.ss_sp = AltStack;
+	ss.ss_size = sizeof(AltStack);
+	ss.ss_flags = 0;
+	sigaltstack(&ss, NULL);
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = Posix_Signal_Handler;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	sigemptyset(&sa.sa_mask);
+
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGFPE, &sa, NULL);
+	sigaction(SIGABRT, &sa, NULL);
+	sigaction(SIGTRAP, &sa, NULL);
+}
+
+void Exception_Register_Log_File(char const * path)
+{
+	if (path == NULL) {
+		RegisteredLogFile[0] = '\0';
+		return;
+	}
+	strncpy(RegisteredLogFile, path, sizeof(RegisteredLogFile) - 1);
+	RegisteredLogFile[sizeof(RegisteredLogFile) - 1] = '\0';
+}
+
+void Exception_Set_Test_Mode(char const * mode)
+{
+	if (mode == NULL) {
+		TestMode[0] = '\0';
+		return;
+	}
+	strncpy(TestMode, mode, sizeof(TestMode) - 1);
+	TestMode[sizeof(TestMode) - 1] = '\0';
+}
 
 void Exception_Run_Immediate_Test(void)
 {
+	if (strcmp(TestMode, "immediate") == 0) {
+		*(volatile int *)16 = 1;
+	}
 }
-
 
 void Exception_Run_Post_Window_Test(void)
 {
+	if (strcmp(TestMode, "postwindow") == 0) {
+		*(volatile int *)16 = 1;
+	}
 }
-
 
 void Exception_Wndproc_Test_Fault(void)
 {
+	*(volatile int *)16 = 1;
 }
 
 #endif

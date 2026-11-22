@@ -1007,7 +1007,9 @@ int FootClass::Do_MISSION_HUNT(void)
  *=============================================================================================*/
 bool FootClass::Stop_Driver(void)
 {
-	Locomotion->Stop_Moving();
+	if (Locomotion != NULL) {
+		Locomotion->Stop_Moving();
+	}
 	return(false);
 }
 
@@ -1132,9 +1134,13 @@ void FootClass::Approach_Target(void)
 		 */
 		bool flyer = (RTTI == RTTI_AIRCRAFT);
 
-		CLSID clsid;
-		IPersistPtr persist(Locomotion);
-		persist->GetClassID(&clsid);
+		CLSID clsid = CLSID_NULL;
+		if (Locomotion != NULL) {
+			IPersistPtr persist(Locomotion);
+			if (persist != NULL) {
+				persist->GetClassID(&clsid);
+			}
+		}
 		if (clsid == CLSID_JumpjetLocomotion) {
 			flyer = true;
 		}
@@ -2387,18 +2393,26 @@ void FootClass::Assign_Destination(AbstractClass * target, bool)
 			ParticleSystems[ATTACHED_PARTICLE_FIRE] = NULL;
 		}
 
-		CLSID locoid;
-		IPersistPtr persist(Locomotion);
-		persist->GetClassID(&locoid);
+		CLSID locoid = CLSID_NULL;
+		if (Locomotion != NULL) {
+			IPersistPtr persist(Locomotion);
+			if (persist != NULL) {
+				persist->GetClassID(&locoid);
+			}
+		}
 
 		if (locoid == CLSID_HoverLocomotion && PathDelay == 0) {
 			PathDelay = 1;
 		}
 
-		Locomotion->Move_To(NavCom->Destination_Coord());
+		if (Locomotion != NULL) {
+			Locomotion->Move_To(NavCom->Destination_Coord());
+		}
 
 	} else if (RTTI != RTTI_AIRCRAFT || (CurrentMission != MISSION_ATTACK && MissionQueue != MISSION_ATTACK) || TarCom == NULL) {
-		Locomotion->Stop_Moving();
+		if (Locomotion != NULL) {
+			Locomotion->Stop_Moving();
+		}
 		NavCom = NULL;
 	}
 
@@ -4766,13 +4780,15 @@ void FootClass::Delete_Me(void)
 /// <returns>bool; Is the object in the air?</returns>
 bool FootClass::In_Air(void) const
 {
-	IPersistPtr loco(Locomotion);
-
-	CLSID clsid;
-	loco->GetClassID(&clsid);
-
-	if (clsid == CLSID_HoverLocomotion) {
-		return(false);
+	if (Locomotion != NULL) {
+		IPersistPtr loco(Locomotion);
+		if (loco != NULL) {
+			CLSID clsid = CLSID_NULL;
+			loco->GetClassID(&clsid);
+			if (clsid == CLSID_HoverLocomotion) {
+				return(false);
+			}
+		}
 	}
 
 	return(BASECLASS::In_Air());
@@ -4790,10 +4806,14 @@ bool FootClass::On_Ground(void) const
 	if (BASECLASS::On_Ground()) {
 		return(true);
 	}
-	IPersistPtr loco(Locomotion);
+	if (Locomotion != NULL) {
+		IPersistPtr loco(Locomotion);
+		if (loco != NULL) {
+			CLSID clsid = CLSID_NULL;
+			loco->GetClassID(&clsid);
+			return(IsDown && clsid == CLSID_HoverLocomotion);
+		}
+	}
 
-	CLSID clsid;
-	loco->GetClassID(&clsid);
-
-	return(IsDown && clsid == CLSID_HoverLocomotion);
+	return(false);
 }
